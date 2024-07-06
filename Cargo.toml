@@ -39,6 +39,7 @@ gpu_tests = []
 examples_world_inspector = []
 
 [dependencies]
+bevy = { version = "0.14", default-features = false, features = [ "bevy_core_pipeline", "bevy_render", "bevy_asset", "x11" ] }
 bytemuck = { version = "1", features = ["derive"] }
 fixedbitset = "0.5"
 copyless = "0.1"
@@ -54,11 +55,6 @@ thiserror = "1.0"
 naga = "0.20"
 naga_oil = { version = "0.14", default-features = false, features = ["test_shader"] }
 
-[dependencies.bevy]
-#version = "0.14.0-rc.3"
-git = "https://github.com/bevyengine/bevy.git"
-default-features = false
-features = [ "bevy_core_pipeline", "bevy_render", "bevy_asset", "x11" ]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -68,12 +64,12 @@ all-features = true
 wgpu = "0.20"
 
 # For world inspector; required if "examples_world_inspector" is used.
-bevy-inspector-egui = "0.23"
-bevy_egui = "0.25"
-egui = "0.26"
+bevy-inspector-egui = "0.25"
+bevy_egui = "0.28"
+egui = "0.28"
 
 # For procedural texture generation in examples
-noise = "0.8"
+noise = "0.9"
 
 futures = "0.3"
 
