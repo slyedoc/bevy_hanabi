@@ -178,7 +178,7 @@ impl Modifier for ConformToSphereModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -190,8 +190,8 @@ impl Modifier for ConformToSphereModifier {
                 let attraction_accel = ctx.eval(m, self.attraction_accel)?;
                 let sticky_factor = if let Some(sticky_factor) = self.sticky_factor { ctx.eval(m, sticky_factor)? } else { "2.0".to_string() };
 
-                let attr_pos = format!("(*particle).{}", Attribute::POSITION.name());
-                let attr_vel = format!("(*particle).{}", Attribute::VELOCITY.name());
+                let attr_pos = format!("particle.{}", Attribute::POSITION.name());
+                let attr_vel = format!("particle.{}", Attribute::VELOCITY.name());
 
                 Ok(format!(
                     r##"    // Sphere center
@@ -224,7 +224,7 @@ impl Modifier for ConformToSphereModifier {
     // Conforming delta speed from attraction acceleration
     let attraction_accel = {attraction_accel};
     let sticky_accel = attraction_accel * {sticky_factor};
-    let conforming_accel = mix(sticky_accel, attraction_accel, shell_factor);
+    let conforming_accel = lerp(sticky_accel, attraction_accel, shell_factor);
     let conforming_delta_speed = sim_params.delta_time * conforming_accel;
     // Final impulse clamped by the maximum acceleration speed
     {attr_vel} += sign(delta_speed) * min(abs(delta_speed), conforming_delta_speed) * origin_dir;
@@ -233,7 +233,7 @@ impl Modifier for ConformToSphereModifier {
             },
         )?;
 
-        context.main_code += &format!("{}(&particle);\n", func_name);
+        context.main_code += &format!("{}(particle);\n", func_name);
 
         Ok(())
     }

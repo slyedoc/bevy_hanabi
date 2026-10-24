@@ -1,8 +1,6 @@
 use std::ops::Sub;
 
 use bevy::prelude::{Quat, Vec2, Vec3, Vec4};
-#[cfg(feature = "gpu_tests")]
-use bevy::render::renderer::{RenderDevice, RenderQueue};
 
 /// Utility trait to compare floating-point values with a tolerance.
 pub(crate) trait AbsDiffEq {
@@ -127,102 +125,60 @@ macro_rules! assert_approx_eq {
 
 pub(crate) use assert_approx_eq;
 
-/// Mock renderer backed by any available WGPU backend, and simulating the real
-/// Bevy backend to enable testing rendering-related features.
-#[cfg(feature = "gpu_tests")]
-#[allow(dead_code)]
-pub(crate) struct MockRenderer {
-    /// WGPU instance backed by any available backend.
-    instance: wgpu::Instance,
-    /// Default WGPU adapter for the configured instance.
-    adapter: wgpu::Adapter,
-    /// Bevy render device abstracting the WGPU backend.
-    device: RenderDevice,
-    /// Bevy render queue sending commands to the render device.
-    queue: RenderQueue,
-}
 
-#[cfg(feature = "gpu_tests")]
-impl MockRenderer {
-    /// Create a new mock renderer with a default backend and adapter.
-    pub fn new() -> Self {
-        #[cfg(debug_assertions)]
-        let flags = wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION;
-        #[cfg(not(debug_assertions))]
-        let flags = wgpu::InstanceFlags::empty();
+/// The Slang every generated module starts with.
+pub(crate) const HANABI_COMMON: &str = include_str!("shaders/hanabi_common.slang");
 
-        // Create the WGPU adapter. Use PRIMARY backends (Vulkan, Metal, DX12,
-        // Browser+WebGPU) to ensure we get a backend that supports compute and other
-        // modern features we might need.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            flags,
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter =
-            futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface: None,
-                ..Default::default()
-            }))
-            .expect("Failed to find an appropriate adapter");
-
-        // Create the logical device and command queue
-        let (device, queue) =
-            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                // Request MAPPABLE_PRIMARY_BUFFERS to allow MAP_WRITE|COPY_DST.
-                // FIXME - Should use a separate buffer from primary to support more platforms.
-                required_features: wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
-                required_limits: wgpu::Limits::defaults(),
-                ..Default::default()
-            }))
-            .expect("Failed to create device");
-
-        // Turn into Bevy objects
-        let device = RenderDevice::from(device);
-        let queue = RenderQueue::new(queue);
-
-        Self {
-            instance,
-            adapter,
-            device,
-            queue,
-        }
-    }
-
-    /// Get the Bevy render device of the mock renderer.
-    pub fn device(&self) -> RenderDevice {
-        self.device.clone()
-    }
-
-    /// Get the Bevy render queue of the mock renderer.
-    pub fn queue(&self) -> RenderQueue {
-        self.queue.clone()
-    }
-}
-
-/// Compile shader tests with the same conditional-translation defaults as Bevy.
-pub(crate) fn compile_wesl(
-    source: &str,
-    features: &[&str],
-    modules: &[(&str, &str)],
-) -> Result<String, wesl::Error> {
-    let mut resolver = wesl::resolver::VirtualResolver::new();
-    let path = "package::test".parse().unwrap();
-    resolver.add_module(path, source.into());
-    for (path, source) in modules {
-        resolver.add_module(path.parse().unwrap(), (*source).into());
-    }
-    let mut options = wesl::CompileOptions {
-        visibility: false,
-        ..Default::default()
+/// The newest `slangc` on `PATH` (as aurora picks it).
+fn slangc() -> std::path::PathBuf {
+    let version = |p: &std::path::Path| -> Option<Vec<u32>> {
+        let out = std::process::Command::new(p).arg("-v").output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        Some(
+            text.split_whitespace()
+                .next()?
+                .trim_start_matches('v')
+                .split('.')
+                .map_while(|n| n.parse().ok())
+                .collect(),
+        )
     };
-    for feature in features {
-        options.features.set(feature, true);
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("slangc"))
+        .filter(|p| p.exists())
+        .filter_map(|p| version(&p).map(|v| (v, p)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, p)| p)
+        .unwrap_or_else(|| "slangc".into())
+}
+
+/// Compile a Slang module to SPIR-V, as aurora does; the compiler's errors on failure.
+pub(crate) fn slang_check(code: &str) -> Result<(), String> {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join("hanabi-slang-tests");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let src = dir.join(format!("{}-{n}.slang", std::process::id()));
+    let out = src.with_extension("spv");
+    std::fs::write(&src, code).map_err(|e| e.to_string())?;
+    let res = std::process::Command::new(slangc())
+        .arg(&src)
+        .args(["-target", "spirv", "-profile", "spirv_1_6", "-o"])
+        .arg(&out)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&out);
+    if res.status.success() {
+        let _ = std::fs::remove_file(&src);
+        Ok(())
+    } else {
+        Err(format!(
+            "{}\n{}",
+            src.display(),
+            String::from_utf8_lossy(&res.stderr)
+        ))
     }
-    wesl::compile(&"package::test".parse().unwrap(), &options, &resolver)
-        .map(|result| result.to_string())
 }

@@ -50,7 +50,7 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{MatrixType, ScalarType, ToWgslString, ValueType, VectorType};
+use crate::{MatrixType, ScalarType, ToSlangString, ValueType, VectorType};
 
 pub mod expr;
 pub mod node;
@@ -284,13 +284,13 @@ impl std::hash::Hash for ScalarValue {
     }
 }
 
-impl ToWgslString for ScalarValue {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for ScalarValue {
+    fn to_slang_string(&self) -> String {
         match *self {
-            ScalarValue::Bool(b) => b.to_wgsl_string(),
-            ScalarValue::Float(f) => f.to_wgsl_string(),
-            ScalarValue::Int(i) => i.to_wgsl_string(),
-            ScalarValue::Uint(u) => u.to_wgsl_string(),
+            ScalarValue::Bool(b) => b.to_slang_string(),
+            ScalarValue::Float(f) => f.to_slang_string(),
+            ScalarValue::Int(i) => i.to_slang_string(),
+            ScalarValue::Uint(u) => u.to_slang_string(),
         }
     }
 }
@@ -1000,21 +1000,21 @@ impl std::hash::Hash for VectorValue {
     }
 }
 
-impl ToWgslString for VectorValue {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for VectorValue {
+    fn to_slang_string(&self) -> String {
         let mut vals = format!(
             "{}({},{}",
-            self.vector_type().to_wgsl_string(),
-            self.value_n::<0>().to_wgsl_string(),
-            self.value_n::<1>().to_wgsl_string()
+            self.vector_type().to_slang_string(),
+            self.value_n::<0>().to_slang_string(),
+            self.value_n::<1>().to_slang_string()
         );
         let count = self.vector_type.count();
         if count > 2 {
             vals.push(',');
-            vals.push_str(&self.value_n::<2>().to_wgsl_string());
+            vals.push_str(&self.value_n::<2>().to_slang_string());
             if count > 3 {
                 vals.push(',');
-                vals.push_str(&self.value_n::<3>().to_wgsl_string());
+                vals.push_str(&self.value_n::<3>().to_slang_string());
             }
         }
         vals.push(')');
@@ -1273,9 +1273,8 @@ impl From<VectorValue> for VectorValueEnum {
 pub struct MatrixValue {
     /// Matrix type.
     matrix_type: MatrixType,
-    /// Raw storage for up to 16 values. Actual usage depends on matrix size.
-    /// Note that data is stored pre-aligned according to WGSL rules, so that we
-    /// can directly return a slice to it.
+    /// Raw storage for up to 16 values, row by row, packed: Slang's natural layout of a
+    /// `floatRxC`, so a slice of it is what the GPU reads.
     storage: [f32; 16],
 }
 
@@ -1307,18 +1306,9 @@ impl MatrixValue {
             matrix_type: MatrixType::new(cols as u8, rows as u8),
             storage: [0.0; 16],
         };
-        if rows != 3 {
-            // Easy; just copy, there's no padding
-            let num = cols * rows;
-            let dst = &mut s.storage[0..num];
-            dst.copy_from_slice(&data[0..num]);
-        } else {
-            // Need to pad each row vec3 -> vec4
-            for col in 0..cols {
-                let dst_offset = col * 4;
-                let dst = &mut s.storage[dst_offset..dst_offset + rows];
-                let src_offset = col * 3;
-                dst.copy_from_slice(&data[src_offset..src_offset + rows]);
+        for col in 0..cols {
+            for row in 0..rows {
+                s.storage[row * cols + col] = data[col * rows + row];
             }
         }
         s
@@ -1357,7 +1347,7 @@ impl MatrixValue {
     /// C-th column.
     pub fn get_n<const R: usize, const C: usize>(&self) -> f32 {
         if R < self.matrix_type.rows() && C < self.matrix_type.cols() {
-            self.storage[self.matrix_type.rows() * C + R]
+            self.storage[self.matrix_type.cols() * R + C]
         } else {
             0f32
         }
@@ -1366,7 +1356,7 @@ impl MatrixValue {
     /// Get the floating-point value of a matrix element.
     pub fn get(&self, row: usize, col: usize) -> f32 {
         if row < self.matrix_type.rows() && col < self.matrix_type.cols() {
-            self.storage[self.matrix_type.rows() * col + row]
+            self.storage[self.matrix_type.cols() * row + col]
         } else {
             0f32
         }
@@ -1376,7 +1366,7 @@ impl MatrixValue {
     fn get_mut(&mut self, row: usize, col: usize) -> &mut f32 {
         assert!(row < self.matrix_type.rows());
         assert!(col < self.matrix_type.cols());
-        &mut self.storage[self.matrix_type.rows() * col + row]
+        &mut self.storage[self.matrix_type.cols() * row + col]
     }
 
     /// Get the value as a binary blob ready for GPU upload.
@@ -1385,8 +1375,7 @@ impl MatrixValue {
     /// contain gaps where no actual matrix data is stored. See
     /// <https://gpuweb.github.io/gpuweb/wgsl/#alignment-and-size> for details.
     pub fn as_bytes(&self) -> &[u8] {
-        // https://gpuweb.github.io/gpuweb/wgsl/#alignment-and-size
-        let count = self.matrix_type.cols() * self.matrix_type.align() / 4;
+        let count = self.matrix_type.cols() * self.matrix_type.rows();
         bytemuck::cast_slice::<f32, u8>(&self.storage[..count])
     }
 
@@ -1425,12 +1414,13 @@ impl std::hash::Hash for MatrixValue {
     }
 }
 
-impl ToWgslString for MatrixValue {
-    fn to_wgsl_string(&self) -> String {
-        let mut vals = format!("{}(", self.matrix_type().to_wgsl_string(),);
-        for j in 0..self.matrix_type.cols() {
-            for i in 0..self.matrix_type.rows() {
-                vals.push_str(&self.value(i, j).to_wgsl_string());
+impl ToSlangString for MatrixValue {
+    fn to_slang_string(&self) -> String {
+        let mut vals = format!("{}(", self.matrix_type().to_slang_string(),);
+        // Slang constructors take rows.
+        for i in 0..self.matrix_type.rows() {
+            for j in 0..self.matrix_type.cols() {
+                vals.push_str(&self.value(i, j).to_slang_string());
                 vals.push(',');
             }
         }
@@ -1446,7 +1436,8 @@ impl From<Mat2> for MatrixValue {
             matrix_type: MatrixType::MAT2X2F,
             storage: [0.; 16],
         };
-        value.write_cols_to_slice(&mut s.storage);
+        // The transpose's columns are the rows.
+        value.transpose().write_cols_to_slice(&mut s.storage);
         s
     }
 }
@@ -1457,7 +1448,8 @@ impl From<Mat3> for MatrixValue {
             matrix_type: MatrixType::MAT3X3F,
             storage: [0.; 16],
         };
-        value.write_cols_to_slice(&mut s.storage);
+        // The transpose's columns are the rows.
+        value.transpose().write_cols_to_slice(&mut s.storage);
         s
     }
 }
@@ -1468,7 +1460,8 @@ impl From<Mat4> for MatrixValue {
             matrix_type: MatrixType::MAT4X4F,
             storage: [0.; 16],
         };
-        value.write_cols_to_slice(&mut s.storage);
+        // The transpose's columns are the rows.
+        value.transpose().write_cols_to_slice(&mut s.storage);
         s
     }
 }
@@ -1570,12 +1563,12 @@ impl Value {
     // }
 }
 
-impl ToWgslString for Value {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for Value {
+    fn to_slang_string(&self) -> String {
         match self {
-            Value::Scalar(s) => s.to_wgsl_string(),
-            Value::Vector(v) => v.to_wgsl_string(),
-            Value::Matrix(m) => m.to_wgsl_string(),
+            Value::Scalar(s) => s.to_slang_string(),
+            Value::Vector(v) => v.to_slang_string(),
+            Value::Matrix(m) => m.to_slang_string(),
         }
     }
 }
@@ -1746,12 +1739,10 @@ mod tests {
 
         let v = Value::Matrix(Mat2::IDENTITY.into());
         let b = v.as_bytes();
-        assert_eq!(b.len(), v.value_type().align() * 2);
         assert_eq!(b.len(), 16);
         let v = Value::Matrix(Mat3::IDENTITY.into());
         let b = v.as_bytes();
-        assert_eq!(b.len(), v.value_type().align() * 3);
-        assert_eq!(b.len(), 48); // sizeof(vec4) * 3
+        assert_eq!(b.len(), 36); // packed rows
         let v = Value::Matrix(Mat4::IDENTITY.into());
         let b = v.as_bytes();
         assert_eq!(b.len(), v.value_type().align() * 4);
@@ -1811,9 +1802,9 @@ mod tests {
         assert_eq!(MatrixValue::new(2, 2, &[0.0; 4]).as_bytes().len(), 16);
         assert_eq!(MatrixValue::new(3, 2, &[0.0; 6]).as_bytes().len(), 24);
         assert_eq!(MatrixValue::new(4, 2, &[0.0; 8]).as_bytes().len(), 32);
-        assert_eq!(MatrixValue::new(2, 3, &[0.0; 6]).as_bytes().len(), 32); // padding!
-        assert_eq!(MatrixValue::new(3, 3, &[0.0; 9]).as_bytes().len(), 48); // padding!
-        assert_eq!(MatrixValue::new(4, 3, &[0.0; 12]).as_bytes().len(), 64); // padding!
+        assert_eq!(MatrixValue::new(2, 3, &[0.0; 6]).as_bytes().len(), 24);
+        assert_eq!(MatrixValue::new(3, 3, &[0.0; 9]).as_bytes().len(), 36);
+        assert_eq!(MatrixValue::new(4, 3, &[0.0; 12]).as_bytes().len(), 48);
         assert_eq!(MatrixValue::new(2, 4, &[0.0; 8]).as_bytes().len(), 32);
         assert_eq!(MatrixValue::new(3, 4, &[0.0; 12]).as_bytes().len(), 48);
         assert_eq!(MatrixValue::new(4, 4, &[0.0; 16]).as_bytes().len(), 64);
@@ -1822,25 +1813,21 @@ mod tests {
         let f: [f32; 16] = [
             0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15.,
         ];
-        let expected24: &[u8] = bytemuck::cast_slice(&f[..]);
-        // R=3 requires extra padding to AlignOf(vec4) = 16
-        let expected3: &[f32] = &[
-            0., 1., 2., 0., 3., 4., 5., 0., 6., 7., 8., 0., 9., 10., 11., 0.,
-        ];
-        let expected3: &[u8] = bytemuck::cast_slice(expected3);
         for j in 2..=4 {
             for i in 2..=4 {
                 let v = MatrixValue::new(i, j, &f[..i * j]);
                 assert_eq!(v.matrix_type().cols(), i);
                 assert_eq!(v.matrix_type().rows(), j);
 
-                let b = v.as_bytes();
-                assert_eq!(b.len(), v.matrix_type().align() * i);
-                if j != 3 {
-                    assert_eq!(b, &expected24[..b.len()], "(i={},j={})", i, j);
-                } else {
-                    assert_eq!(b, &expected3[..b.len()], "(i={},j={})", i, j);
+                // Packed rows: element (row r, col c) of column-major `f` at r * cols + c.
+                let mut expected = vec![0f32; i * j];
+                for c in 0..i {
+                    for r in 0..j {
+                        expected[r * i + c] = f[c * j + r];
+                    }
                 }
+                let b = v.as_bytes();
+                assert_eq!(b, bytemuck::cast_slice::<f32, u8>(&expected), "(i={},j={})", i, j);
             }
         }
     }
@@ -1902,18 +1889,18 @@ mod tests {
     }
 
     #[test]
-    fn to_wgsl_string() {
+    fn to_slang_string() {
         for b in [true, false] {
-            assert_eq!(Value::Scalar(b.into()).to_wgsl_string(), b.to_wgsl_string());
+            assert_eq!(Value::Scalar(b.into()).to_slang_string(), b.to_slang_string());
         }
         for f in [0_f32, -1., 1., 1e-5] {
-            assert_eq!(Value::Scalar(f.into()).to_wgsl_string(), f.to_wgsl_string());
+            assert_eq!(Value::Scalar(f.into()).to_slang_string(), f.to_slang_string());
         }
         for u in [0_u32, 1, 42, 999999] {
-            assert_eq!(Value::Scalar(u.into()).to_wgsl_string(), u.to_wgsl_string());
+            assert_eq!(Value::Scalar(u.into()).to_slang_string(), u.to_slang_string());
         }
         for i in [0_i32, -1, 1, -42, 42, -100000, 100000] {
-            assert_eq!(Value::Scalar(i.into()).to_wgsl_string(), i.to_wgsl_string());
+            assert_eq!(Value::Scalar(i.into()).to_slang_string(), i.to_slang_string());
         }
         for v in [
             Vec2::ZERO,
@@ -1925,7 +1912,7 @@ mod tests {
             Vec2::NEG_Y,
             Vec2::new(-42.578, 663.449),
         ] {
-            assert_eq!(Value::Vector(v.into()).to_wgsl_string(), v.to_wgsl_string());
+            assert_eq!(Value::Vector(v.into()).to_slang_string(), v.to_slang_string());
         }
         for v in [
             Vec3::ZERO,
@@ -1939,7 +1926,7 @@ mod tests {
             Vec3::NEG_Z,
             Vec3::new(-42.578, 663.449, -42558.35),
         ] {
-            assert_eq!(Value::Vector(v.into()).to_wgsl_string(), v.to_wgsl_string());
+            assert_eq!(Value::Vector(v.into()).to_slang_string(), v.to_slang_string());
         }
         for v in [
             Vec4::ZERO,
@@ -1953,23 +1940,24 @@ mod tests {
             Vec4::NEG_Z,
             Vec4::new(-42.578, 663.449, -42558.35, -4.2),
         ] {
-            assert_eq!(Value::Vector(v.into()).to_wgsl_string(), v.to_wgsl_string());
+            assert_eq!(Value::Vector(v.into()).to_slang_string(), v.to_slang_string());
         }
 
         for (m, expected) in [
-            (Mat3::IDENTITY, "mat3x3<f32>(1.,0.,0.,0.,1.,0.,0.,0.,1.)"),
-            (Mat3::ZERO, "mat3x3<f32>(0.,0.,0.,0.,0.,0.,0.,0.,0.)"),
+            (Mat3::IDENTITY, "float3x3(1.,0.,0.,0.,1.,0.,0.,0.,1.)"),
+            (Mat3::ZERO, "float3x3(0.,0.,0.,0.,0.,0.,0.,0.,0.)"),
             (
                 Mat3::from_cols(
                     Vec3::new(1., 2., 3.),
                     Vec3::new(4., 5., 6.),
                     Vec3::new(7., 8., 9.),
                 ),
-                "mat3x3<f32>(1.,2.,3.,4.,5.,6.,7.,8.,9.)",
+                // Slang takes rows: the columns 123, 456, 789 read down.
+                "float3x3(1.,4.,7.,2.,5.,8.,3.,6.,9.)",
             ),
         ] {
             assert_eq!(
-                Value::Matrix(m.into()).to_wgsl_string(),
+                Value::Matrix(m.into()).to_slang_string(),
                 expected.to_string()
             );
         }

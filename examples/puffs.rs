@@ -249,8 +249,8 @@ impl RenderModifier for LambertianLightingModifier {
         // Shade each fragment.
         context.fragment_code += &format!(
             "color = vec4(color.rgb * mix({}, 1.0, dot(normal, {})), color.a);",
-            self.ambient.to_wgsl_string(),
-            self.light_direction.to_wgsl_string()
+            self.ambient.to_slang_string(),
+            self.light_direction.to_slang_string()
         );
 
         Ok(())

@@ -165,7 +165,7 @@ impl Modifier for RadialAccelModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -173,8 +173,8 @@ impl Modifier for RadialAccelModifier {
                 let accel = ctx.eval(m, self.accel)?;
 
                 Ok(format!(
-                    r##"let radial = normalize((*particle).{} - {});
-            (*particle).{} += radial * (({}) * sim_params.delta_time);
+                    r##"let radial = normalize(particle.{} - {});
+            particle.{} += radial * (({}) * sim_params.delta_time);
         "##,
                     Attribute::POSITION.name(),
                     origin,
@@ -184,7 +184,7 @@ impl Modifier for RadialAccelModifier {
             },
         )?;
 
-        context.main_code += &format!("{}(&particle);\n", func_name);
+        context.main_code += &format!("{}(particle);\n", func_name);
 
         Ok(())
     }
@@ -288,10 +288,10 @@ impl Modifier for TangentAccelModifier {
         let accel = context.eval(module, self.accel)?;
 
         context.extra_code += &format!(
-            r##"fn {}(particle: ptr<function, Particle>) {{
-    let radial = normalize((*particle).{} - {});
+            r##"void {}(inout Particle particle) {{
+    let radial = normalize(particle.{} - {});
     let tangent = normalize(cross({}, radial));
-    (*particle).{} += tangent * (({}) * sim_params.delta_time);
+    particle.{} += tangent * (({}) * sim_params.delta_time);
 }}
 "##,
             func_name,
@@ -302,7 +302,7 @@ impl Modifier for TangentAccelModifier {
             accel,
         );
 
-        context.main_code += &format!("{}(&particle);\n", func_name);
+        context.main_code += &format!("{}(particle);\n", func_name);
 
         Ok(())
     }
@@ -311,7 +311,7 @@ impl Modifier for TangentAccelModifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParticleLayout, Property, PropertyLayout, TextureLayout, ToWgslString};
+    use crate::{ParticleLayout, Property, PropertyLayout, TextureLayout, ToSlangString};
 
     #[test]
     fn mod_accel() {
@@ -330,7 +330,7 @@ mod tests {
         );
         assert!(modifier.apply(&mut module, &mut context).is_ok());
 
-        assert!(context.main_code.contains(&accel.to_wgsl_string()));
+        assert!(context.main_code.contains(&accel.to_slang_string()));
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         );
         assert!(modifier.apply(&mut module, &mut context).is_ok());
         // TODO: less weak check...
-        assert!(context.extra_code.contains(&accel.to_wgsl_string()));
+        assert!(context.extra_code.contains(&accel.to_slang_string()));
 
         let origin = module.attr(Attribute::POSITION);
         let my_prop = module.add_property("my_prop", 3.0.into());
@@ -389,6 +389,6 @@ mod tests {
         assert!(modifier.apply(&mut module, &mut context).is_ok());
 
         // TODO: less weak check...
-        assert!(context.extra_code.contains(&accel.to_wgsl_string()));
+        assert!(context.extra_code.contains(&accel.to_slang_string()));
     }
 }

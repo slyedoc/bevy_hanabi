@@ -973,7 +973,7 @@ mod tests {
             &texture_layout,
         );
         let str = context.eval(&module, outputs[0]).unwrap();
-        assert_eq!(str, "normalize(vec3<f32>(1.,1.,1.))".to_string());
+        assert_eq!(str, "normalize(float3(1.,1.,1.))".to_string());
     }
 
     #[test]

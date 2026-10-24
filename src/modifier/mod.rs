@@ -362,9 +362,9 @@ impl EvalContext for ShaderWriter<'_> {
         self.extra_code += &ctx.extra_code;
 
         // Append the function itself
-        let ret = ret.map(|x| format!("-> {x} ")).unwrap_or_default();
+        let ret = ret.unwrap_or("void");
         self.extra_code += &format!(
-            r##"fn {0}({1}) {ret}{{
+            r##"{ret} {0}({1}) {{
 {2}{3}}}"##,
             func_name, args, ctx.main_code, body
         );
@@ -554,9 +554,9 @@ impl EvalContext for RenderContext<'_> {
         self.render_extra += &ctx.render_extra;
 
         // Append the function itself
-        let ret = ret.map(|x| format!("-> {x} ")).unwrap_or_default();
+        let ret = ret.unwrap_or("void");
         self.render_extra += &format!(
-            r##"fn {0}({1}) {ret}{{
+            r##"{ret} {0}({1}) {{
             {2};
         }}
         "##,
@@ -701,11 +701,11 @@ impl EmitSpawnEventModifier {
 
         let cond = match self.condition {
             EventEmitCondition::Always => format!(
-                "if (is_alive) {{ append_spawn_events_{channel_index}((*effect_metadata).base_child_index, particle_index, {}); }}",
+                "if (is_alive) {{ append_spawn_events_{channel_index}(effect_metadata.base_child_index, particle_index, {}); }}",
                 count_var
             ),
             EventEmitCondition::OnDie => format!(
-                "if (was_alive && !is_alive) {{ append_spawn_events_{channel_index}((*effect_metadata).base_child_index, particle_index, {}); }}",
+                "if (was_alive && !is_alive) {{ append_spawn_events_{channel_index}(effect_metadata.base_child_index, particle_index, {}); }}",
                 count_var
             ),
         };
@@ -951,7 +951,6 @@ pub fn register_modifiers(type_registry: &AppTypeRegistry) {
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
-    use naga::front::wgsl::Frontend;
 
     use super::*;
     use crate::{BuiltInOperator, ExprWriter, ScalarType};
@@ -1090,6 +1089,46 @@ mod tests {
         assert_eq!(*rm_reflect, m);
     }
 
+    /// A compute module around generated code, with what aurora's kernels give it.
+    fn slang_harness(attributes_code: &str, extra: &str, body: &str) -> String {
+        format!(
+            r##"{common}
+struct SimParams {{
+    float4 frustum[6];
+    float4 camera_position;
+    float delta_time;
+    float time;
+    float virtual_delta_time;
+    float virtual_time;
+    float real_delta_time;
+    float real_time;
+    uint num_effects;
+}};
+static SimParams sim_params;
+
+float4 transform_position_simulation_to_world(float3 p) {{ return float4(p, 1.0); }}
+float3 transform_normal_simulation_to_world(float3 n) {{ return n; }}
+float3 get_camera_position_effect_space() {{ return float3(0.0); }}
+// Rows: the camera's axes.
+float3x3 get_camera_rotation_effect_space() {{ return float3x3(1., 0., 0., 0., 1., 0., 0., 0., 1.); }}
+
+struct Particle {{
+{attributes_code}}};
+
+{extra}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void main() {{
+    Particle particle = {{}};
+    var is_alive = true;
+{body}
+}}
+"##,
+            common = crate::test_utils::HANABI_COMMON,
+        )
+    }
+
     #[test]
     fn validate_init() {
         let mut module = Module::default();
@@ -1151,38 +1190,13 @@ mod tests {
             let particle_layout = particle_layout.build();
             let attributes_code = particle_layout.generate_code();
 
-            let code = format!(
-                r##"fn frand() -> f32 {{
-    return 0.0;
-}}
-
-const tau: f32 = 6.283185307179586476925286766559;
-
-struct Particle {{
-    {attributes_code}
-}};
-
-{extra_code}
-
-@compute @workgroup_size(64)
-fn main() {{
-    var particle = Particle();
-{main_code}
-}}"##
-            );
-            // println!("code: {:?}", code);
-
-            let mut frontend = Frontend::new();
-            let res = frontend.parse(&code);
-            if let Err(err) = &res {
-                println!(
-                    "Modifier: {:?}",
+            let code = slang_harness(&attributes_code, &extra_code, &main_code);
+            if let Err(err) = crate::test_utils::slang_check(&code) {
+                panic!(
+                    "{:?}: {err}",
                     modifier.get_represented_type_info().unwrap().type_path()
                 );
-                println!("Code: {:?}", code);
-                println!("Err: {:?}", err);
             }
-            assert!(res.is_ok());
         }
     }
 
@@ -1257,75 +1271,21 @@ fn main() {{
             let particle_layout = particle_layout.build();
             let attributes_code = particle_layout.generate_code();
 
-            let code = format!(
-                r##"fn frand() -> f32 {{
-    return 0.0;
-}}
-
-const tau: f32 = 6.283185307179586476925286766559;
-
-struct Particle {{
-    {attributes_code}
-}};
-
-struct ParticleBuffer {{
-    particles: array<Particle>,
-}};
-
-struct SimParams {{
-    delta_time: f32,
-    time: f32,
-    virtual_delta_time: f32,
-    virtual_time: f32,
-    real_delta_time: f32,
-    real_time: f32,
-}};
-
-struct Spawner {{
-    transform: mat3x4<f32>, // transposed (row-major)
-    spawn: atomic<i32>,
-    seed: u32,
-    count_unused: u32,
-    effect_index: u32,
-}};
-
-fn proj(u: vec3<f32>, v: vec3<f32>) -> vec3<f32> {{
-    return dot(v, u) / dot(u,u) * u;
-}}
-
-{update_extra}
-
-@group(0) @binding(0) var<uniform> sim_params : SimParams;
-@group(1) @binding(0) var<storage, read_write> particle_buffer : ParticleBuffer;
-@group(2) @binding(0) var<storage, read_write> spawner : Spawner; // NOTE - same group as init
-
-@compute @workgroup_size(64)
-fn main() {{
-    var particle: Particle = particle_buffer.particles[0];
-    var is_alive = true;
-{update_code}
-}}"##
-            );
-
-            let mut frontend = Frontend::new();
-            let res = frontend.parse(&code);
-            if let Err(err) = &res {
-                println!(
-                    "Modifier: {:?}",
+            let code = slang_harness(&attributes_code, &update_extra, &update_code);
+            if let Err(err) = crate::test_utils::slang_check(&code) {
+                panic!(
+                    "{:?}: {err}",
                     modifier.get_represented_type_info().unwrap().type_path()
                 );
-                println!("Code: {:?}", code);
-                println!("Err: {:?}", err);
             }
-            assert!(res.is_ok());
         }
     }
 
     #[test]
     fn validate_render() {
         let base_module = Module::default();
+        // ParticleTextureModifier samples in the fragment stage, which aurora has not (yet).
         let modifiers: &[&dyn RenderModifier] = &[
-            &ParticleTextureModifier::new(0),
             &ColorOverLifetimeModifier::default(),
             &SizeOverLifetimeModifier::default(),
             &OrientModifier::new(OrientMode::ParallelCameraDepthPlane),
@@ -1339,7 +1299,6 @@ fn main() {{
             let particle_layout = ParticleLayout::default();
             let texture_layout = module.texture_layout();
             assert_eq!(texture_layout.layout.len(), 1);
-            let texture_bindinds = texture_layout.to_wgsl_binding(2, 4);
             let mut context =
                 RenderContext::new(&property_layout, &particle_layout, &texture_layout);
             modifier
@@ -1356,93 +1315,26 @@ fn main() {{
             let particle_layout = particle_layout.build();
             let attributes_code = particle_layout.generate_code();
 
-            let code = format!(
-                r##"
-struct ColorGrading {{
-    balance: mat3x3<f32>,
-    saturation: vec3<f32>,
-    contrast: vec3<f32>,
-    gamma: vec3<f32>,
-    gain: vec3<f32>,
-    lift: vec3<f32>,
-    midtone_range: vec2<f32>,
-    exposure: f32,
-    hue: f32,
-    post_saturation: f32,
-}}
-
-struct View {{
-    clip_from_world: mat4x4<f32>,
-    unjittered_clip_from_world: mat4x4<f32>,
-    world_from_clip: mat4x4<f32>,
-    world_from_view: mat4x4<f32>,
-    view_from_world: mat4x4<f32>,
-    clip_from_view: mat4x4<f32>,
-    view_from_clip: mat4x4<f32>,
-    world_position: vec3<f32>,
-    exposure: f32,
-    // viewport(x_origin, y_origin, width, height)
-    viewport: vec4<f32>,
-    frustum: array<vec4<f32>, 6>,
-    color_grading: ColorGrading,
-    mip_bias: f32,
-}}
-
-fn frand() -> f32 {{ return 0.0; }}
-fn get_camera_position_effect_space() -> vec3<f32> {{ return vec3<f32>(); }}
-fn get_camera_rotation_effect_space() -> mat3x3<f32> {{ return mat3x3<f32>(); }}
-
-const tau: f32 = 6.283185307179586476925286766559;
-
-struct Particle {{
-    {attributes_code}
-}};
-
-struct VertexOutput {{
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-}};
-
-@group(0) @binding(0) var<uniform> view: View;
-{texture_bindinds}
-
-{render_extra}
-
-@compute @workgroup_size(64)
-fn main() {{
-    var particle = Particle();
-    var position = vec3<f32>(0.0, 0.0, 0.0);
-    var velocity = vec3<f32>(0.0, 0.0, 0.0);
-    var size = vec3<f32>(1.0, 1.0, 1.0);
-    var axis_x = vec3<f32>(1.0, 0.0, 0.0);
-    var axis_y = vec3<f32>(0.0, 1.0, 0.0);
-    var axis_z = vec3<f32>(0.0, 0.0, 1.0);
-    var color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+            let body = format!(
+                r##"    var position = float3(0.0, 0.0, 0.0);
+    var velocity = float3(0.0, 0.0, 0.0);
+    var size = float3(1.0, 1.0, 1.0);
+    var axis_x = float3(1.0, 0.0, 0.0);
+    var axis_y = float3(0.0, 1.0, 0.0);
+    var axis_z = float3(0.0, 0.0, 1.0);
+    var color = float4(1.0, 1.0, 1.0, 1.0);
+    var uv = float2(0.0);
 {vertex_code}
-    var out: VertexOutput;
-    return out;
-}}
-
-
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {{
-    var color = vec4<f32>(0.0);
-    var uv = vec2<f32>(0.0);
 {fragment_code}
-    return vec4<f32>(1.0);
-}}"##
+"##
             );
-
-            let mut frontend = Frontend::new();
-            let res = frontend.parse(&code);
-            if let Err(err) = &res {
-                println!(
-                    "Modifier: {:?}\n",
+            let code = slang_harness(&attributes_code, &render_extra, &body);
+            if let Err(err) = crate::test_utils::slang_check(&code) {
+                panic!(
+                    "{:?}: {err}",
                     modifier.get_represented_type_info().unwrap().type_path()
                 );
-                println!("Code: {code:?}\n\nError: {err:?}");
             }
-            assert!(res.is_ok());
         }
     }
 

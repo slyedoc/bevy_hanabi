@@ -115,7 +115,7 @@ use thiserror::Error;
 use super::Value;
 use crate::{
     Attribute, ModifierContext, ParticleLayout, Property, PropertyLayout, ScalarType,
-    SlotDimension, TextureLayout, TextureSlot, ToWgslString, ValueType, VectorType,
+    SlotDimension, TextureLayout, TextureSlot, ToSlangString, ValueType, VectorType,
 };
 
 /// A one-based ID into a collection of a [`Module`].
@@ -1175,9 +1175,9 @@ impl Expr {
                 // }
 
                 Ok(if op.is_functional() {
-                    format!("{}({})", op.to_wgsl_string(), expr)
+                    format!("{}({})", op.to_slang_string(), expr)
                 } else {
-                    format!("{}.{}", expr, op.to_wgsl_string())
+                    format!("{}.{}", expr, op.to_slang_string())
                 })
             }
             Expr::Binary { op, left, right } => {
@@ -1225,7 +1225,7 @@ impl Expr {
 
                         Ok(format!(
                             "{}_{}({}, {})",
-                            op.to_wgsl_string(),
+                            op.to_slang_string(),
                             suffix,
                             compiled_left,
                             compiled_right
@@ -1233,16 +1233,26 @@ impl Expr {
                     } else {
                         Ok(format!(
                             "{}({}, {})",
-                            op.to_wgsl_string(),
+                            op.to_slang_string(),
                             compiled_left,
                             compiled_right
                         ))
                     }
+                } else if *op == BinaryOperator::Mul
+                    && [*left, *right].iter().any(|e| {
+                        matches!(
+                            module.get(*e).and_then(|arg| arg.value_type()),
+                            Some(ValueType::Matrix(_))
+                        )
+                    })
+                {
+                    // `*` is componentwise on Slang matrices.
+                    Ok(format!("mul({}, {})", compiled_left, compiled_right))
                 } else {
                     Ok(format!(
                         "({}) {} ({})",
                         compiled_left,
-                        op.to_wgsl_string(),
+                        op.to_slang_string(),
                         compiled_right
                     ))
                 };
@@ -1275,7 +1285,7 @@ impl Expr {
 
                 Ok(format!(
                     "{}({}, {}, {})",
-                    op.to_wgsl_string(),
+                    op.to_slang_string(),
                     first,
                     second,
                     third
@@ -1285,7 +1295,7 @@ impl Expr {
                 // Recursively evaluate child expressions throught the context to ensure caching
                 let inner = context.eval(module, expr.inner)?;
 
-                Ok(format!("{}({})", expr.target.to_wgsl_string(), inner))
+                Ok(format!("{}({})", expr.target.to_slang_string(), inner))
             }
             Expr::TextureSample(expr) => expr.eval(module, context),
             Expr::TextureLoad(expr) => expr.eval(module, context),
@@ -1331,13 +1341,13 @@ impl LiteralExpr {
 
     /// Evaluate the expression in the given context.
     pub fn eval(&self, _context: &dyn EvalContext) -> Result<String, ExprError> {
-        Ok(self.value.to_wgsl_string())
+        Ok(self.value.to_slang_string())
     }
 }
 
-impl ToWgslString for LiteralExpr {
-    fn to_wgsl_string(&self) -> String {
-        self.value.to_wgsl_string()
+impl ToSlangString for LiteralExpr {
+    fn to_slang_string(&self) -> String {
+        self.value.to_slang_string()
     }
 }
 
@@ -1384,7 +1394,7 @@ impl AttributeExpr {
     }
 
     /// Evaluate the expression in the given context.
-    pub fn eval(&self, context: &dyn EvalContext, parent: bool) -> Result<String, ExprError> {
+    pub fn eval(&self, _context: &dyn EvalContext, parent: bool) -> Result<String, ExprError> {
         if self.attr == Attribute::ID {
             // Pseudo-attribute, not stored in the particle buffer
             Ok(if parent {
@@ -1402,17 +1412,13 @@ impl AttributeExpr {
             } else {
                 "particle"
             };
-            if context.is_attribute_pointer() {
-                Ok(format!("(*{}).{}", owner, self.attr.name()))
-            } else {
-                Ok(format!("{}.{}", owner, self.attr.name()))
-            }
+            Ok(format!("{}.{}", owner, self.attr.name()))
         }
     }
 }
 
-impl ToWgslString for AttributeExpr {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for AttributeExpr {
+    fn to_slang_string(&self) -> String {
         format!("particle.{}", self.attr.name())
     }
 }
@@ -1470,7 +1476,7 @@ impl PropertyExpr {
             )));
         }
 
-        Ok(prop.to_wgsl_string())
+        Ok(prop.to_slang_string())
     }
 }
 
@@ -1697,7 +1703,7 @@ impl TextureSampleExpr {
             ));
         }
 
-        // Note: do not use to_wgsl_string(), we want an index suffix and not a WGSL
+        // Note: do not use to_slang_string(), we want an index suffix and not a WGSL
         // literal value.
         let slot_index = self.slot_index;
         if self.slot_dimension.is_array() {
@@ -1889,7 +1895,7 @@ impl TextureLoadExpr {
             ));
         }
 
-        // Note: do not use to_wgsl_string(), we want an index suffix and not a WGSL
+        // Note: do not use to_slang_string(), we want an index suffix and not a WGSL
         // literal value.
         let slot_index = self.slot_index;
         match self.slot_dimension {
@@ -2062,8 +2068,8 @@ impl BuiltInOperator {
     // }
 }
 
-impl ToWgslString for BuiltInOperator {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for BuiltInOperator {
+    fn to_slang_string(&self) -> String {
         match self {
             BuiltInOperator::Rand(_) => format!("{}()", self.name()),
             BuiltInOperator::IsAlive => "is_alive".to_string(),
@@ -2126,15 +2132,15 @@ impl BuiltInExpr {
     pub fn eval(&self, context: &mut dyn EvalContext) -> Result<String, ExprError> {
         Ok(check_side_effects_and_create_local_if_needed(
             context,
-            self.to_wgsl_string(),
+            self.to_slang_string(),
             self.has_side_effect(),
         ))
     }
 }
 
-impl ToWgslString for BuiltInExpr {
-    fn to_wgsl_string(&self) -> String {
-        self.operator.to_wgsl_string()
+impl ToSlangString for BuiltInExpr {
+    fn to_slang_string(&self) -> String {
+        self.operator.to_slang_string()
     }
 }
 
@@ -2367,8 +2373,8 @@ impl UnaryOperator {
     }
 }
 
-impl ToWgslString for UnaryOperator {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for UnaryOperator {
+    fn to_slang_string(&self) -> String {
         match *self {
             UnaryOperator::Abs => "abs".to_string(),
             UnaryOperator::Acos => "acos".to_string(),
@@ -2381,8 +2387,8 @@ impl ToWgslString for UnaryOperator {
             UnaryOperator::Exp => "exp".to_string(),
             UnaryOperator::Exp2 => "exp2".to_string(),
             UnaryOperator::Floor => "floor".to_string(),
-            UnaryOperator::Fract => "fract".to_string(),
-            UnaryOperator::InvSqrt => "inverseSqrt".to_string(),
+            UnaryOperator::Fract => "frac".to_string(),
+            UnaryOperator::InvSqrt => "rsqrt".to_string(),
             UnaryOperator::Length => "length".to_string(),
             UnaryOperator::Log => "log".to_string(),
             UnaryOperator::Log2 => "log2".to_string(),
@@ -2604,8 +2610,8 @@ impl BinaryOperator {
     }
 }
 
-impl ToWgslString for BinaryOperator {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for BinaryOperator {
+    fn to_slang_string(&self) -> String {
         match *self {
             BinaryOperator::Add => "+".to_string(),
             BinaryOperator::Atan2 => "atan2".to_string(),
@@ -2681,10 +2687,10 @@ pub enum TernaryOperator {
     Vec3,
 }
 
-impl ToWgslString for TernaryOperator {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for TernaryOperator {
+    fn to_slang_string(&self) -> String {
         match *self {
-            TernaryOperator::Mix => "mix".to_string(),
+            TernaryOperator::Mix => "lerp".to_string(),
             TernaryOperator::Clamp => "clamp".to_string(),
             TernaryOperator::SmoothStep => "smoothstep".to_string(),
             TernaryOperator::Vec3 => "vec3".to_string(),
@@ -4527,7 +4533,7 @@ mod tests {
 
         // Make a function
         let func_name = "my_func";
-        let args = "arg0: i32, arg1: f32";
+        let args = "int arg0, float arg1";
         assert!(ctx
             .make_fn(func_name, args, None, &mut module, &mut |m, ctx| {
                 m.lit(3.);
@@ -4647,7 +4653,7 @@ mod tests {
             assert_eq!(
                 expr,
                 format!(
-                    "(particle.{}) {} (vec3<f32>(1.,1.,1.))",
+                    "(particle.{}) {} (float3(1.,1.,1.))",
                     Attribute::POSITION.name(),
                     op,
                 )
@@ -4842,30 +4848,30 @@ mod tests {
                 "abs",
                 &format!("particle.{}", Attribute::POSITION.name())[..],
             ),
-            (acos, "acos", "vec4<f32>(0.,0.,0.,1.)"),
-            (all, "all", "vec3<bool>(false,true,false)"),
-            (any, "any", "vec3<bool>(false,true,false)"),
-            (asin, "asin", "vec4<f32>(0.,0.,0.,1.)"),
-            (atan, "atan", "vec4<f32>(0.,0.,0.,1.)"),
-            (ceil, "ceil", "vec3<f32>(1.,-3.1,6.99)"),
-            (cos, "cos", "vec3<f32>(1.,-3.1,6.99)"),
-            (exp, "exp", "vec3<f32>(1.,-3.1,6.99)"),
-            (exp2, "exp2", "vec3<f32>(1.,-3.1,6.99)"),
-            (floor, "floor", "vec3<f32>(1.,-3.1,6.99)"),
-            (fract, "fract", "vec3<f32>(1.,-3.1,6.99)"),
-            (inv_sqrt, "inverseSqrt", "vec3<f32>(1.,-3.1,6.99)"),
-            (length, "length", "vec3<f32>(1.,-3.1,6.99)"),
-            (log, "log", "vec3<f32>(1.,-3.1,6.99)"),
-            (log2, "log2", "vec3<f32>(1.,-3.1,6.99)"),
-            (norm, "normalize", "vec3<f32>(1.,-3.1,6.99)"),
-            (pack4x8snorm, "pack4x8snorm", "vec4<f32>(-1.,1.,0.,7.2)"),
-            (pack4x8unorm, "pack4x8unorm", "vec4<f32>(-1.,1.,0.,7.2)"),
-            (round, "round", "vec3<f32>(1.,-3.1,6.99)"),
-            (saturate, "saturate", "vec3<f32>(1.,-3.1,6.99)"),
-            (sign, "sign", "vec3<f32>(1.,-3.1,6.99)"),
-            (sin, "sin", "vec3<f32>(1.,-3.1,6.99)"),
-            (sqrt, "sqrt", "vec3<f32>(1.,-3.1,6.99)"),
-            (tan, "tan", "vec3<f32>(1.,-3.1,6.99)"),
+            (acos, "acos", "float4(0.,0.,0.,1.)"),
+            (all, "all", "bool3(false,true,false)"),
+            (any, "any", "bool3(false,true,false)"),
+            (asin, "asin", "float4(0.,0.,0.,1.)"),
+            (atan, "atan", "float4(0.,0.,0.,1.)"),
+            (ceil, "ceil", "float3(1.,-3.1,6.99)"),
+            (cos, "cos", "float3(1.,-3.1,6.99)"),
+            (exp, "exp", "float3(1.,-3.1,6.99)"),
+            (exp2, "exp2", "float3(1.,-3.1,6.99)"),
+            (floor, "floor", "float3(1.,-3.1,6.99)"),
+            (fract, "frac", "float3(1.,-3.1,6.99)"),
+            (inv_sqrt, "rsqrt", "float3(1.,-3.1,6.99)"),
+            (length, "length", "float3(1.,-3.1,6.99)"),
+            (log, "log", "float3(1.,-3.1,6.99)"),
+            (log2, "log2", "float3(1.,-3.1,6.99)"),
+            (norm, "normalize", "float3(1.,-3.1,6.99)"),
+            (pack4x8snorm, "pack4x8snorm", "float4(-1.,1.,0.,7.2)"),
+            (pack4x8unorm, "pack4x8unorm", "float4(-1.,1.,0.,7.2)"),
+            (round, "round", "float3(1.,-3.1,6.99)"),
+            (saturate, "saturate", "float3(1.,-3.1,6.99)"),
+            (sign, "sign", "float3(1.,-3.1,6.99)"),
+            (sin, "sin", "float3(1.,-3.1,6.99)"),
+            (sqrt, "sqrt", "float3(1.,-3.1,6.99)"),
+            (tan, "tan", "float3(1.,-3.1,6.99)"),
             (unpack4x8snorm, "unpack4x8snorm", "0u"),
             (unpack4x8unorm, "unpack4x8unorm", "0u"),
         ] {
@@ -4876,10 +4882,10 @@ mod tests {
         }
 
         for (expr, op, inner) in [
-            (comp_x, "x", "vec4<f32>(0.,0.,0.,1.)"),
-            (comp_y, "y", "vec4<f32>(0.,0.,0.,1.)"),
-            (comp_z, "z", "vec4<f32>(0.,0.,0.,1.)"),
-            (comp_w, "w", "vec4<f32>(0.,0.,0.,1.)"),
+            (comp_x, "x", "float4(0.,0.,0.,1.)"),
+            (comp_y, "y", "float4(0.,0.,0.,1.)"),
+            (comp_z, "z", "float4(0.,0.,0.,1.)"),
+            (comp_w, "w", "float4(0.,0.,0.,1.)"),
         ] {
             let expr = ctx.eval(&m, expr);
             assert!(expr.is_ok());
@@ -4930,7 +4936,7 @@ mod tests {
             assert_eq!(
                 expr,
                 format!(
-                    "{}(particle.{}, vec3<f32>(1.,1.,1.))",
+                    "{}(particle.{}, float3(1.,1.,1.))",
                     op,
                     Attribute::POSITION.name(),
                 )
@@ -4976,7 +4982,7 @@ mod tests {
         );
 
         for (expr, op, third) in [
-            (mix, "mix", t),
+            (mix, "lerp", t),
             (clamp, "clamp", z),
             (smoothstep, "smoothstep", x),
         ] {
@@ -4987,7 +4993,7 @@ mod tests {
             assert_eq!(
                 expr,
                 format!(
-                    "{}(particle.{}, vec3<f32>(1.,1.,1.), {})",
+                    "{}(particle.{}, float3(1.,1.,1.), {})",
                     op,
                     Attribute::POSITION.name(),
                     third
@@ -5042,7 +5048,7 @@ mod tests {
             let cast = ctx.eval(&m, cast);
             assert!(cast.is_ok());
             let cast = cast.unwrap();
-            assert_eq!(cast, format!("{}({})", target.to_wgsl_string(), expr));
+            assert_eq!(cast, format!("{}({})", target.to_slang_string(), expr));
         }
     }
 
@@ -5079,7 +5085,7 @@ mod tests {
         let res = ctx.eval(&m, x);
         assert!(res.is_ok());
         let xx = res.ok().unwrap();
-        assert_eq!(xx, format!("(*particle).{}", Attribute::POSITION.name()));
+        assert_eq!(xx, format!("particle.{}", Attribute::POSITION.name()));
     }
 
     #[test]
@@ -5188,7 +5194,7 @@ mod tests {
                 &texture_layout,
             );
             let value = ctx.eval(&m, b).unwrap();
-            assert_eq!(value, "mix(var0, var0, var0)");
+            assert_eq!(value, "lerp(var0, var0, var0)");
             assert_eq!(ctx.main_code, "let var0 = frand();\n");
         }
 
@@ -5223,7 +5229,7 @@ mod tests {
     //     println!("boxed literal: {:?}", s);
     //     let b_serde: ExprHandle = ron::from_str(&s).unwrap();
     //     assert!(b_serde.is_const());
-    //     assert_eq!(b_serde.to_wgsl_string(), b.to_wgsl_string());
+    //     assert_eq!(b_serde.to_slang_string(), b.to_slang_string());
 
     //     let v0 = Value::Scalar(3.0_f32.into());
     //     let v1 = Value::Scalar(2.5_f32.into());
@@ -5236,8 +5242,8 @@ mod tests {
     //     println!("add: {:?}", s);
     //     let a_serde: AddExpr = ron::from_str(&s).unwrap();
     //     println!("a_serde: {:?}", a_serde);
-    //     assert_eq!(a_serde.left.to_wgsl_string(), l0.to_wgsl_string());
-    //     assert_eq!(a_serde.right.to_wgsl_string(), l1.to_wgsl_string());
+    //     assert_eq!(a_serde.left.to_slang_string(), l0.to_slang_string());
+    //     assert_eq!(a_serde.right.to_slang_string(), l1.to_slang_string());
     // }
 
     #[test]

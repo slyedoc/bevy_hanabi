@@ -102,7 +102,7 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{graph::Value, ToWgslString, ValueType};
+use crate::{graph::Value, ToSlangString, ValueType};
 
 /// A single property of an [`EffectAsset`].
 ///
@@ -165,8 +165,8 @@ impl Property {
     }
 }
 
-impl ToWgslString for Property {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for Property {
+    fn to_slang_string(&self) -> String {
         format!("properties[properties_array_index].{}", self.name)
     }
 }
@@ -489,7 +489,7 @@ impl std::fmt::Debug for PropertyLayoutEntry {
             "(+{}) {}: {}",
             self.offset,
             self.property.name(),
-            self.property.value_type().to_wgsl_string(),
+            self.property.value_type().to_slang_string(),
         ))
     }
 }
@@ -833,23 +833,20 @@ impl PropertyLayout {
         if self.layout.is_empty() {
             return None;
         }
-        let content = self
-            .layout
-            .iter()
-            .map(|entry| {
-                format!(
-                    "    {}: {},",
-                    entry.property.name(),
-                    entry.property.value_type().to_wgsl_string()
-                )
-            })
-            .fold("struct Properties {\n".to_string(), |mut a, b| {
-                a.reserve(b.len() + 1);
-                a.push_str(&b);
-                a.push('\n');
-                a
-            })
-            + "}\n";
+        let content = format!(
+            "struct Properties {{\n{}}};\n",
+            crate::slang_struct_members(
+                self.layout.iter().map(|entry| {
+                    (
+                        entry.offset,
+                        entry.property.name(),
+                        entry.property.value_type().to_slang_string(),
+                        entry.property.size() as u32,
+                    )
+                }),
+                self.min_binding_size().get() as u32,
+            )
+        );
         Some(content)
     }
 
@@ -896,7 +893,7 @@ mod tests {
         assert_eq!(p.value_type(), value.value_type());
         assert_eq!(p.size(), value.value_type().size());
         assert_eq!(
-            p.to_wgsl_string(),
+            p.to_slang_string(),
             format!("properties[properties_array_index].{}", p.name())
         );
     }
@@ -927,7 +924,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", entry1),
-            "(+16) my_prop: vec3<f32>".to_string()
+            "(+16) my_prop: float3".to_string()
         );
         assert_eq!(entry1, entry1);
         assert_eq!(hash_ple(&entry1), hash_ple(&entry1));
@@ -940,7 +937,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", entry1b),
-            "(+16) my_prop: vec3<f32>".to_string()
+            "(+16) my_prop: float3".to_string()
         );
         assert_eq!(entry1, entry1b);
         assert_eq!(hash_ple(&entry1), hash_ple(&entry1b));
@@ -953,7 +950,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", entry2),
-            "(+16) other_prop: vec3<f32>".to_string()
+            "(+16) other_prop: float3".to_string()
         );
         assert_ne!(entry1, entry2);
         assert_ne!(hash_ple(&entry1), hash_ple(&entry2));
@@ -966,7 +963,7 @@ mod tests {
             property: prop3,
             offset: 16,
         };
-        assert_eq!(format!("{:?}", entry3), "(+16) my_prop: f32".to_string());
+        assert_eq!(format!("{:?}", entry3), "(+16) my_prop: float".to_string());
         assert_ne!(entry1, entry3);
         assert_ne!(hash_ple(&entry1), hash_ple(&entry3));
         assert_ne!(entry1b, entry3);
@@ -980,7 +977,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", entry4),
-            "(+24) my_prop: vec3<f32>".to_string()
+            "(+24) my_prop: float3".to_string()
         );
         assert_ne!(entry1, entry4);
         assert_ne!(hash_ple(&entry1), hash_ple(&entry4));
@@ -1031,11 +1028,13 @@ mod tests {
             s,
             Some(
                 r#"struct Properties {
-    vec4: vec4<f32>,
-    vec3: vec3<f32>,
-    f32: f32,
-    vec2: vec2<f32>,
-}
+    float4 vec4;
+    float3 vec3;
+    float f32;
+    float2 vec2;
+    uint _pad0;
+    uint _pad1;
+};
 "#
                 .to_string()
             )
@@ -1066,10 +1065,12 @@ mod tests {
             s,
             Some(
                 r#"struct Properties {
-    vec4a: vec4<f32>,
-    vec3b: vec3<f32>,
-    vec3c: vec3<f32>,
-}
+    float4 vec4a;
+    float3 vec3b;
+    uint _pad0;
+    float3 vec3c;
+    uint _pad1;
+};
 "#
                 .to_string()
             )
@@ -1097,10 +1098,14 @@ mod tests {
             s,
             Some(
                 r#"struct Properties {
-    vec3a: vec3<f32>,
-    vec3b: vec3<f32>,
-    vec2: vec2<f32>,
-}
+    float3 vec3a;
+    uint _pad0;
+    float3 vec3b;
+    uint _pad1;
+    float2 vec2;
+    uint _pad2;
+    uint _pad3;
+};
 "#
                 .to_string()
             )
@@ -1126,9 +1131,12 @@ mod tests {
             s,
             Some(
                 r#"struct Properties {
-    vec3: vec3<f32>,
-    vec2: vec2<f32>,
-}
+    float3 vec3;
+    uint _pad0;
+    float2 vec2;
+    uint _pad1;
+    uint _pad2;
+};
 "#
                 .to_string()
             )
@@ -1154,9 +1162,10 @@ mod tests {
             s,
             Some(
                 r#"struct Properties {
-    vec2: vec2<f32>,
-    f32: f32,
-}
+    float2 vec2;
+    float f32;
+    uint _pad0;
+};
 "#
                 .to_string()
             )

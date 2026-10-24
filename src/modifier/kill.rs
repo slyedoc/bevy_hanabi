@@ -241,7 +241,7 @@ impl Modifier for KillFrustumModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             Some("bool"),
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -252,7 +252,7 @@ impl Modifier for KillFrustumModifier {
                 };
 
                 Ok(format!(
-                    r##"    let p = transform_position_simulation_to_world((*particle).{0}).xyz;
+                    r##"    let p = transform_position_simulation_to_world(particle.{0}).xyz;
     let threshold = {1};
     for (var i = 0; i < 6; i += 1) {{
         if (dot(sim_params.frustum[i].xyz, p) + sim_params.frustum[i].w + threshold <= 0) {{
@@ -268,7 +268,7 @@ impl Modifier for KillFrustumModifier {
         )?;
 
         context.main_code +=
-            &format!("if ({func_name}(&particle)) {{\n    is_alive = false;\n}}\n");
+            &format!("if ({func_name}(particle)) {{\n    is_alive = false;\n}}\n");
 
         Ok(())
     }

@@ -59,7 +59,7 @@ impl SetPositionCircleModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -86,14 +86,14 @@ impl SetPositionCircleModifier {
     let sign = step(0.0, n.z) * 2.0 - 1.0;
     let a = -1.0 / (sign + n.z);
     let b = n.x * n.y * a;
-    let tangent = vec3<f32>(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
-    let bitangent = vec3<f32>(b, sign + n.y * n.y * a, -n.y);
+    let tangent = float3(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
+    let bitangent = float3(b, sign + n.y * n.y * a, -n.y);
     // Circle radius
     {}
     // Spawn random point on/in circle
     let theta = frand() * tau;
     let dir = tangent * cos(theta) + bitangent * sin(theta);
-    (*particle).{} = c + r * dir;
+    particle.{} = c + r * dir;
 "##,
                     center,
                     axis,
@@ -103,7 +103,7 @@ impl SetPositionCircleModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }
@@ -160,7 +160,7 @@ impl SetPositionSphereModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -196,8 +196,8 @@ impl SetPositionSphereModifier {
     let sinphi = sin(phi);
     let x = sinphi * cos(theta);
     let y = sinphi * sin(theta);
-    let dir = vec3<f32>(x, y, z);
-    (*particle).{} = c + r * dir;
+    let dir = float3(x, y, z);
+    particle.{} = c + r * dir;
 "##,
                     center,
                     radius,
@@ -206,7 +206,7 @@ impl SetPositionSphereModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }
@@ -276,7 +276,7 @@ impl SetPositionCone3dModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -309,7 +309,7 @@ impl SetPositionCone3dModifier {
     let x = r * cost;
     let y = h;
     let z = r * sint;
-    (*particle).{3} = vec3<f32>(x, y, z);
+    particle.{3} = float3(x, y, z);
 "##,
                     height,
                     top_radius,
@@ -319,7 +319,7 @@ impl SetPositionCone3dModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }
@@ -381,7 +381,7 @@ impl SetPositionBoxModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -399,9 +399,9 @@ impl SetPositionBoxModifier {
     let rand2 = frand() - 0.5;
     let fixed = 0.5;
 
-    var x: f32;
-    var y: f32;
-    var z: f32;
+    var x: float;
+    var y: float;
+    var z: float;
 
     if face < (1. / 6.) {{
         x = rand1 * extent.x;
@@ -428,7 +428,7 @@ impl SetPositionBoxModifier {
         y = rand2 * extent.y;
         z = -fixed * extent.z;
     }}
-    (*particle).{} = center + vec3(x, y, z);
+    particle.{} = center + vec3(x, y, z);
 "#,
                             center,
                             extent,
@@ -439,7 +439,7 @@ impl SetPositionBoxModifier {
                         r#"    let center = {};
     let extent = {};
     let mult = frand3() - 0.5;
-    (*particle).{} = center + extent * mult;
+    particle.{} = center + extent * mult;
 "#,
                         center,
                         extent,
@@ -451,7 +451,7 @@ impl SetPositionBoxModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     impl_mod_render, Attribute, BoxedModifier, CpuValue, EvalContext, ExprError, ExprHandle,
     Gradient, Modifier, ModifierContext, Module, RenderContext, RenderModifier, ShaderCode,
-    ShaderWriter, ToWgslString,
+    ShaderWriter, ToSlangString,
 };
 
 /// Mapping of the sample read from a texture image to the base particle color.
@@ -51,7 +51,7 @@ impl ImageSampleMapping {
         match *self {
             ImageSampleMapping::Modulate => format!("color = color * texColor{texture_slot};"),
             ImageSampleMapping::ModulateRGB => {
-                format!("color = vec4<f32>(color.rgb * texColor{texture_slot}.rgb, color.a);")
+                format!("color = float4(color.rgb * texColor{texture_slot}.rgb, color.a);")
             }
             ImageSampleMapping::ModulateOpacityFromR => {
                 format!("color.a = color.a * texColor{texture_slot}.r;")
@@ -246,7 +246,7 @@ impl RenderModifier for SetColorModifier {
         context: &mut RenderContext,
     ) -> Result<(), ExprError> {
         let op = self.blend.to_assign_operator();
-        let col = self.color.to_wgsl_string();
+        let col = self.color.to_slang_string();
         let s = if self.mask == ColorBlendMask::RGBA {
             format!("color {op} {col};\n")
         } else {
@@ -308,7 +308,7 @@ impl RenderModifier for ColorOverLifetimeModifier {
     ) -> Result<(), ExprError> {
         let func_name = context.add_color_gradient(self.gradient.clone());
         context.render_extra += &format!(
-            r#"fn {0}(key: f32) -> vec4<f32> {{
+            r#"float4 {0}(float key) {{
     {1}
 }}
 
@@ -335,7 +335,7 @@ impl RenderModifier for ColorOverLifetimeModifier {
                 ColorBlendMode::Add => "0".to_string(),
                 ColorBlendMode::Modulate => "1".to_string(),
             };
-            format!("color {op} vec4<f32>(({col}).{mask}, {non_mask});\n")
+            format!("color {op} float4(({col}).{mask}, {non_mask});\n")
         };
 
         context.vertex_code += &s;
@@ -377,7 +377,7 @@ impl RenderModifier for SetSizeModifier {
         _module: &mut Module,
         context: &mut RenderContext,
     ) -> Result<(), ExprError> {
-        context.vertex_code += &format!("size = {0};\n", self.size.to_wgsl_string());
+        context.vertex_code += &format!("size = {0};\n", self.size.to_slang_string());
         Ok(())
     }
 
@@ -421,7 +421,7 @@ impl RenderModifier for SizeOverLifetimeModifier {
     ) -> Result<(), ExprError> {
         let func_name = context.add_size_gradient(self.gradient.clone());
         context.render_extra += &format!(
-            r#"fn {0}(key: f32) -> vec3<f32> {{
+            r#"float3 {0}(float key) {{
     {1}
 }}
 
@@ -840,7 +840,7 @@ impl RenderModifier for ScreenSpaceSizeModifier {
         context.vertex_code += &format!(
             "let w_cs = transform_position_simulation_to_clip(particle.{0}).w;\n
             let screen_size_pixels = view.viewport.zw;\n
-            let projection_scale = vec2<f32>(view.clip_from_view[0][0], view.clip_from_view[1][1]);\n
+            let projection_scale = float2(view.clip_from_view[0][0], view.clip_from_view[1][1]);\n
             size = (size * w_cs * 2.0) / min(screen_size_pixels.x * projection_scale.x, screen_size_pixels.y * projection_scale.y);\n",
             Attribute::POSITION.name());
         Ok(())
@@ -1047,7 +1047,7 @@ mod tests {
         modifier.apply_render(&mut module, &mut context).unwrap();
 
         assert_eq!(modifier.color, CpuValue::from(Vec4::ZERO));
-        assert_eq!(context.vertex_code, "color = vec4<f32>(0.,0.,0.,0.);\n");
+        assert_eq!(context.vertex_code, "color = float4(0.,0.,0.,0.);\n");
     }
 
     #[test]
@@ -1066,7 +1066,7 @@ mod tests {
         modifier.apply_render(&mut module, &mut context).unwrap();
 
         assert_eq!(modifier.size, CpuValue::from(Vec3::ZERO));
-        assert_eq!(context.vertex_code, "size = vec3<f32>(0.,0.,0.);\n");
+        assert_eq!(context.vertex_code, "size = float3(0.,0.,0.);\n");
     }
 
     #[test]

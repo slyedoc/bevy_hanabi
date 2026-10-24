@@ -185,10 +185,6 @@ use bevy::{
     camera::visibility::VisibilityClass,
     platform::collections::{HashMap, HashSet},
     prelude::*,
-    render::{
-        extract_component::ExtractComponent, render_resource::IntoBindGroupLayoutEntryBuilder as _,
-        sync_world::SyncToRenderWorld,
-    },
 };
 use rand::{RngExt as _, SeedableRng as _};
 use serde::{Deserialize, Serialize};
@@ -201,7 +197,7 @@ pub mod graph;
 pub mod modifier;
 mod plugin;
 pub mod properties;
-mod render;
+mod aurora;
 mod spawn;
 mod time;
 
@@ -209,7 +205,7 @@ mod time;
 mod test_utils;
 
 pub use asset::{
-    AlphaMode, DefaultMesh, EffectAsset, EffectAssetDeserializer, EffectAssetLoader,
+    AlphaMode, EffectAsset, EffectAssetDeserializer, EffectAssetLoader,
     EffectAssetSerializer, EffectParent, MotionIntegration, SimulationCondition,
 };
 pub use attributes::*;
@@ -218,13 +214,39 @@ pub use graph::*;
 pub use modifier::*;
 pub use plugin::{EffectSystems, HanabiPlugin};
 pub use properties::*;
-pub use render::{DebugSettings, LayoutFlags, ShaderCache};
+pub use aurora::LayoutFlags;
 pub use spawn::{tick_spawners, CpuValue, EffectSpawner, Random, SpawnerSettings};
 pub use time::{EffectSimulation, EffectSimulationTime};
-use wgpu::{
-    BindGroupLayoutEntry, BindingType, SamplerBindingType, ShaderStages, TextureDescriptor,
-    TextureDimension, TextureSampleType, TextureViewDimension,
-};
+
+/// The members of a Slang struct laid out at the given byte offsets, in Slang's natural
+/// (scalar) layout: each gap, and the tail up to `stride`, an explicit `uint` pad, so the GPU
+/// reads every field where the CPU layout put it. Entries are `(offset, name, type, size)`.
+pub(crate) fn slang_struct_members<'a>(
+    entries: impl IntoIterator<Item = (u32, &'a str, String, u32)>,
+    stride: u32,
+) -> String {
+    let mut code = String::new();
+    let mut at = 0u32;
+    let mut pads = 0u32;
+    let mut pad = |code: &mut String, from: u32, to: u32| {
+        debug_assert!((to - from) % 4 == 0);
+        for _ in 0..(to - from) / 4 {
+            code.push_str(&format!("    uint _pad{pads};\n"));
+            pads += 1;
+        }
+    };
+    for (offset, name, ty, size) in entries {
+        if offset > at {
+            pad(&mut code, at, offset);
+        }
+        code.push_str(&format!("    {ty} {name};\n"));
+        at = offset + size;
+    }
+    if stride > at {
+        pad(&mut code, at, stride);
+    }
+    code
+}
 
 #[allow(missing_docs)]
 pub mod prelude {
@@ -232,10 +254,6 @@ pub mod prelude {
     pub use crate::*;
 }
 
-#[cfg(not(any(feature = "2d", feature = "3d")))]
-compile_error!(
-    "You need to enable at least one of the '2d' or '3d' features for anything to happen."
-);
 
 /// Extension trait to convert an object to WGSL code.
 ///
@@ -248,9 +266,9 @@ compile_error!(
 /// # Example
 ///
 /// ```
-/// # use bevy_hanabi::ToWgslString;
+/// # use bevy_hanabi::ToSlangString;
 /// let x = 2.0_f32;
-/// assert_eq!("let x = 2.;", format!("let x = {};", x.to_wgsl_string()));
+/// assert_eq!("let x = 2.;", format!("let x = {};", x.to_slang_string()));
 /// ```
 ///
 /// # Remark
@@ -263,60 +281,60 @@ compile_error!(
 ///
 /// [`format!()`]: std::format
 /// [`EvalContext::eval()`]: crate::graph::expr::EvalContext::eval
-pub trait ToWgslString {
+pub trait ToSlangString {
     /// Convert an object to a string representing its WGSL code.
-    fn to_wgsl_string(&self) -> String;
+    fn to_slang_string(&self) -> String;
 }
 
-impl ToWgslString for f32 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for f32 {
+    fn to_slang_string(&self) -> String {
         let s = format!("{self:.6}");
         s.trim_end_matches('0').to_string()
     }
 }
 
-impl ToWgslString for f64 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for f64 {
+    fn to_slang_string(&self) -> String {
         let s = format!("{self:.15}");
         s.trim_end_matches('0').to_string()
     }
 }
 
-impl ToWgslString for Vec2 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for Vec2 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec2<f32>({0},{1})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string()
+            "float2({0},{1})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for Vec3 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for Vec3 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec3<f32>({0},{1},{2})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string()
+            "float3({0},{1},{2})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for Vec4 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for Vec4 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec4<f32>({0},{1},{2},{3})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string(),
-            self.w.to_wgsl_string()
+            "float4({0},{1},{2},{3})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string(),
+            self.w.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for bool {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for bool {
+    fn to_slang_string(&self) -> String {
         if *self {
             "true".to_string()
         } else {
@@ -325,164 +343,164 @@ impl ToWgslString for bool {
     }
 }
 
-impl ToWgslString for BVec2 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for BVec2 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec2<bool>({0},{1})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string()
+            "bool2({0},{1})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for BVec3 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for BVec3 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec3<bool>({0},{1},{2})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string()
+            "bool3({0},{1},{2})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for BVec4 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for BVec4 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec4<bool>({0},{1},{2},{3})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string(),
-            self.w.to_wgsl_string()
+            "bool4({0},{1},{2},{3})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string(),
+            self.w.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for i32 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for i32 {
+    fn to_slang_string(&self) -> String {
         format!("{}", self)
     }
 }
 
-impl ToWgslString for IVec2 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for IVec2 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec2<i32>({0},{1})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string()
+            "int2({0},{1})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for IVec3 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for IVec3 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec3<i32>({0},{1},{2})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string()
+            "int3({0},{1},{2})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for IVec4 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for IVec4 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec4<i32>({0},{1},{2},{3})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string(),
-            self.w.to_wgsl_string()
+            "int4({0},{1},{2},{3})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string(),
+            self.w.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for u32 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for u32 {
+    fn to_slang_string(&self) -> String {
         format!("{}u", self)
     }
 }
 
-impl ToWgslString for UVec2 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for UVec2 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec2<u32>({0},{1})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string()
+            "uint2({0},{1})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for UVec3 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for UVec3 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec3<u32>({0},{1},{2})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string()
+            "uint3({0},{1},{2})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for UVec4 {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for UVec4 {
+    fn to_slang_string(&self) -> String {
         format!(
-            "vec4<u32>({0},{1},{2},{3})",
-            self.x.to_wgsl_string(),
-            self.y.to_wgsl_string(),
-            self.z.to_wgsl_string(),
-            self.w.to_wgsl_string()
+            "uint4({0},{1},{2},{3})",
+            self.x.to_slang_string(),
+            self.y.to_slang_string(),
+            self.z.to_slang_string(),
+            self.w.to_slang_string()
         )
     }
 }
 
-impl ToWgslString for CpuValue<f32> {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for CpuValue<f32> {
+    fn to_slang_string(&self) -> String {
         match self {
-            Self::Single(x) => x.to_wgsl_string(),
+            Self::Single(x) => x.to_slang_string(),
             Self::Uniform((a, b)) => format!(
                 "(frand() * ({1} - {0}) + {0})",
-                a.to_wgsl_string(),
-                b.to_wgsl_string(),
+                a.to_slang_string(),
+                b.to_slang_string(),
             ),
         }
     }
 }
 
-impl ToWgslString for CpuValue<Vec2> {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for CpuValue<Vec2> {
+    fn to_slang_string(&self) -> String {
         match self {
-            Self::Single(v) => v.to_wgsl_string(),
+            Self::Single(v) => v.to_slang_string(),
             Self::Uniform((a, b)) => format!(
                 "(frand2() * ({1} - {0}) + {0})",
-                a.to_wgsl_string(),
-                b.to_wgsl_string(),
+                a.to_slang_string(),
+                b.to_slang_string(),
             ),
         }
     }
 }
 
-impl ToWgslString for CpuValue<Vec3> {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for CpuValue<Vec3> {
+    fn to_slang_string(&self) -> String {
         match self {
-            Self::Single(v) => v.to_wgsl_string(),
+            Self::Single(v) => v.to_slang_string(),
             Self::Uniform((a, b)) => format!(
                 "(frand3() * ({1} - {0}) + {0})",
-                a.to_wgsl_string(),
-                b.to_wgsl_string(),
+                a.to_slang_string(),
+                b.to_slang_string(),
             ),
         }
     }
 }
 
-impl ToWgslString for CpuValue<Vec4> {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for CpuValue<Vec4> {
+    fn to_slang_string(&self) -> String {
         match self {
-            Self::Single(v) => v.to_wgsl_string(),
+            Self::Single(v) => v.to_slang_string(),
             Self::Uniform((a, b)) => format!(
                 "(frand4() * ({1} - {0}) + {0})",
-                a.to_wgsl_string(),
-                b.to_wgsl_string(),
+                a.to_slang_string(),
+                b.to_slang_string(),
             ),
         }
     }
@@ -532,13 +550,13 @@ impl SimulationSpace {
                     }
                     let pos = Attribute::POSITION.name();
                     let mut code = format!(
-                        "particle.{0} = (transform * vec4<f32>(particle.{0}, 1.0)).xyz;\n",
+                        "particle.{0} = mul(transform, float4(particle.{0}, 1.0)).xyz;\n",
                         pos
                     );
                     if context.particle_layout().contains(Attribute::VELOCITY) {
                         let vel = Attribute::VELOCITY.name();
                         code.push_str(&format!(
-                            "particle.{0} = (transform * vec4<f32>(particle.{0}, 0.0)).xyz;\n",
+                            "particle.{0} = mul(transform, float4(particle.{0}, 0.0)).xyz;\n",
                             vel
                         ));
                     }
@@ -549,9 +567,9 @@ impl SimulationSpace {
             ModifierContext::Update => Ok(String::new()),
             ModifierContext::Render => Ok(match *self {
                 // TODO: cast vec3 -> vec4 auomatically
-                SimulationSpace::Global => "vec4<f32>(local_position, 1.0)",
+                SimulationSpace::Global => "float4(local_position, 1.0)",
                 // TODO: transform_world_to_view(...)
-                SimulationSpace::Local => "transform * vec4<f32>(local_position, 1.0)",
+                SimulationSpace::Local => "mul(transform, float4(local_position, 1.0))",
             }
             .to_string()),
             _ => Err(ExprError::GraphEvalError(
@@ -619,8 +637,7 @@ impl From<&PropertyInstance> for PropertyValue {
 pub struct HanabiMainCamera;
 
 /// The [`VisibilityClass`] used for all particle effects.
-#[derive(Default, Clone, Copy, Component, ExtractComponent)]
-#[extract_app(bevy::render::RenderApp)]
+#[derive(Default, Clone, Copy, Component)]
 pub struct EffectVisibilityClass;
 
 /// Particle-based visual effect instance.
@@ -685,13 +702,7 @@ pub struct EffectVisibilityClass;
 /// for example.
 #[derive(Debug, Default, Clone, Component, Reflect)]
 #[reflect(Component)]
-#[require(
-    CompiledParticleEffect,
-    Transform,
-    Visibility,
-    VisibilityClass,
-    SyncToRenderWorld
-)]
+#[require(CompiledParticleEffect, Transform, Visibility, VisibilityClass)]
 #[component(on_add = bevy::camera::visibility::add_visibility_class::<EffectVisibilityClass>)]
 pub struct ParticleEffect {
     /// Handle of the effect to instantiate.
@@ -837,38 +848,6 @@ impl SlotDimension {
                 | SlotDimension::DepthCubeArray
         )
     }
-
-    /// Convert this slot dimension to a WGSL texture type name.
-    pub fn to_wgsl_texture_type(&self) -> String {
-        match *self {
-            SlotDimension::D1 => "texture_1d<f32>",
-            SlotDimension::D2 => "texture_2d<f32>",
-            SlotDimension::D2Array => "texture_2d_array<f32>",
-            SlotDimension::D3 => "texture_3d<f32>",
-            SlotDimension::Cube => "texture_cube<f32>",
-            SlotDimension::CubeArray => "texture_cube_array<f32>",
-            SlotDimension::DepthD2 => "texture_depth_2d<f32>",
-            SlotDimension::DepthD2Array => "texture_depth_2d_array<f32>",
-            SlotDimension::DepthCube => "texture_depth_cube<f32>",
-            SlotDimension::DepthCubeArray => "texture_depth_cube_array<f32>",
-        }
-        .to_string()
-    }
-
-    /// Convert this slot dimension to a WGSL sampler type.
-    ///
-    /// This returns `sampler_comparison` if [`is_depth()`] is `true`, or
-    /// `sampler` otherwise.
-    ///
-    /// [`is_depth()`]: Self::is_depth
-    pub fn to_wgsl_sampler_type(&self) -> String {
-        if self.is_depth() {
-            "sampler_comparison"
-        } else {
-            "sampler"
-        }
-        .to_string()
-    }
 }
 
 /// Texture slot of a [`Module`].
@@ -884,118 +863,6 @@ pub struct TextureSlot {
     /// Texture dimension the slot uses. This determines the sampler of the slot
     /// in the WGSL shader.
     pub dimension: SlotDimension,
-}
-
-impl TextureSlot {
-    /// Check if this slot accepts the given texture type.
-    ///
-    /// - `texture_dimension` determines the cardinality 1D/2D/3D of the texture
-    ///   access.
-    /// - `array_layer_count` is the number of layers of an array texture. It
-    ///   can only be > 1 for a [`SlotDimension`] corresponding to an array
-    ///   texture.
-    /// - `is_depth` determines if the texture is accessed via a comparison
-    ///   sampler as a depth texture. Note that this doesn't mean that the
-    ///   texture must contain values that semantically represent a depth value;
-    ///   the semantic of a texture value is irrelevant for the shader compiler,
-    ///   and only matters for the author.
-    pub fn accepts(
-        &self,
-        texture_dimension: TextureDimension,
-        array_layer_count: u32,
-        is_depth: bool,
-    ) -> bool {
-        let expected_dimension = match self.dimension {
-            SlotDimension::D1 => TextureDimension::D1,
-            SlotDimension::D3 => TextureDimension::D3,
-            _ => TextureDimension::D2,
-        };
-        if texture_dimension != expected_dimension {
-            return false;
-        }
-
-        // Depth slots need a texture with a depth format
-        if self.dimension.is_depth() != is_depth {
-            return false;
-        }
-
-        // Cube textures need a number of layer multiple of 6. And non-array ones need
-        // exactly 6.
-        if self.dimension.is_cube()
-            && ((!self.dimension.is_array() && (array_layer_count != 6))
-                || !array_layer_count.is_multiple_of(6))
-        {
-            return false;
-        }
-
-        // A layer count > 1 requires an array textures or a cube texture
-        if array_layer_count > 1 {
-            self.dimension.is_array() || self.dimension.is_cube()
-        } else {
-            true
-        }
-    }
-
-    /// Get the WGPU binding type [`BindingType`] for a texture bound to this
-    /// slot.
-    ///
-    /// This returns a [`BindingType::Texture`].
-    pub fn to_texture_binding_type(&self) -> BindingType {
-        let (sample_type, view_dimension) = match self.dimension {
-            SlotDimension::D1 => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::D1,
-            ),
-            SlotDimension::D2 => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::D2,
-            ),
-            SlotDimension::D2Array => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::D2Array,
-            ),
-            SlotDimension::D3 => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::D3,
-            ),
-            SlotDimension::Cube => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::Cube,
-            ),
-            SlotDimension::CubeArray => (
-                TextureSampleType::Float { filterable: true },
-                TextureViewDimension::CubeArray,
-            ),
-            SlotDimension::DepthD2 => (TextureSampleType::Depth, TextureViewDimension::D2),
-            SlotDimension::DepthD2Array => {
-                (TextureSampleType::Depth, TextureViewDimension::D2Array)
-            }
-            SlotDimension::DepthCube => (TextureSampleType::Depth, TextureViewDimension::Cube),
-            SlotDimension::DepthCubeArray => {
-                (TextureSampleType::Depth, TextureViewDimension::CubeArray)
-            }
-        };
-        BindingType::Texture {
-            sample_type,
-            view_dimension,
-            multisampled: false,
-        }
-    }
-
-    /// Get the WGPU binding type [`BindingType`] for a sampler bound to this
-    /// slot.
-    ///
-    /// This returns a [`BindingType::Sampler`] which is either a
-    /// [`SamplerBindingType::Comparison`] if [`SlotDimension::is_depth()`] is
-    /// `true`, or [`SamplerBindingType::Filtering`] otherwise.
-    pub fn to_sampler_binding_type(&self) -> BindingType {
-        let sampler_binding_type = if self.dimension.is_depth() {
-            SamplerBindingType::Comparison
-        } else {
-            SamplerBindingType::Filtering
-        };
-        BindingType::Sampler(sampler_binding_type)
-    }
 }
 
 /// Texture layout.
@@ -1020,124 +887,30 @@ impl TextureLayout {
     pub fn get_slot_by_name(&self, name: &str) -> Option<usize> {
         self.layout.iter().position(|slot| slot.name == name)
     }
-
-    /// Check if the given texture is compatible with the given slot.
-    ///
-    /// This checks that the slot index is valid, and that
-    /// [`TextureSlot::accepts()`] is `true` for that slot.
-    pub fn is_compatible(&self, slot_index: u32, texture_descriptor: &TextureDescriptor) -> bool {
-        if slot_index >= self.layout.len() as u32 {
-            return false;
-        }
-        if texture_descriptor.sample_count > 1 {
-            // Multisampled textures not currently supported by Hanabi
-            return false;
-        }
-        let slot = &self.layout[slot_index as usize];
-        slot.accepts(
-            texture_descriptor.dimension,
-            texture_descriptor.array_layer_count(),
-            texture_descriptor.format.is_depth_stencil_format(),
-        )
-    }
-
-    /// Append the bindings for the textures described by this layout.
-    pub fn append_layout_bindings(
-        &self,
-        start_binding: u32,
-        entries: &mut Vec<BindGroupLayoutEntry>,
-    ) {
-        let mut bind_index = start_binding;
-        for slot in &self.layout {
-            let tex_index = bind_index;
-            let sampler_index = bind_index + 1;
-            entries.push(
-                slot.to_texture_binding_type()
-                    .into_bind_group_layout_entry_builder()
-                    .build(
-                        tex_index,
-                        ShaderStages::COMPUTE | ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ),
-            );
-            entries.push(
-                slot.to_sampler_binding_type()
-                    .into_bind_group_layout_entry_builder()
-                    .build(
-                        sampler_index,
-                        ShaderStages::COMPUTE | ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ),
-            );
-            bind_index += 2;
-        }
-    }
-
-    /// Generate the WGSL code for the material bindings of this layout.
-    pub fn to_wgsl_binding(&self, group_index: u32, start_index: u32) -> String {
-        if self.layout.is_empty() {
-            return String::new();
-        }
-        let mut code = String::with_capacity(160 * self.layout.len());
-        let mut bind_index = start_index;
-        for (slot_index, slot) in self.layout.iter().enumerate() {
-            let tex_index = bind_index;
-            let sampler_index = bind_index + 1;
-            let texture_type = slot.dimension.to_wgsl_texture_type();
-            let sampler_type = slot.dimension.to_wgsl_sampler_type();
-            code.push_str(&format!(
-                "@group({group_index}) @binding({tex_index}) var material_texture_{slot_index}: {texture_type};
-@group({group_index}) @binding({sampler_index}) var material_sampler_{slot_index}: {sampler_type};
-"
-            ));
-            bind_index += 2;
-        }
-        code
-    }
 }
 
 /// Optional mesh override for a particle effect.
 ///
-/// Add this component to the same entity as a [`ParticleEffect`] to override
-/// the [`Mesh`] used to render the particles.
-#[derive(Debug, Default, Clone, PartialEq, Hash, Component)]
-pub struct EffectMesh(pub Handle<Mesh>);
+/// Add this component to the same entity as a [`ParticleEffect`] to override the mesh each
+/// particle traces as (an [`AuroraMesh`]; the default is an analytic sphere).
+///
+/// [`AuroraMesh`]: bevy_aurora::mesh::AuroraMesh
+#[derive(Debug, Default, Clone, PartialEq, Component)]
+pub struct EffectMesh(pub Handle<bevy_aurora::mesh::AuroraMesh>);
 
-/// Effect shaders.
+/// Slang source of an effect's kernels.
 ///
-/// Contains the final shaders for the init, update, and render passes of a
-/// single effect type.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EffectShaders {
-    /// The init compute shader, which runs on each newly spawned particle to
-    /// initialize its data once.
-    pub init: Handle<Shader>,
-    /// The update compute shader, which runs every frame to simulate all alive
-    /// particles.
-    pub update: Handle<Shader>,
-    /// The render graphics shader, which actually renders alive particles.
-    pub render: Handle<Shader>,
-}
-
-/// Source code (WESL) of an effect.
-///
-/// The source code is generated from an [`EffectAsset`] by applying all
-/// modifiers. The resulting source code is _configured_ (the Hanabi variables
-/// `{{VARIABLE}}` are replaced with the relevant WGSL code) but is not
-/// _specialized_ (the conditional attributes like `@if` are still present).
-///
-/// This is mainly used internally by Hanabi as an intermediate step toward
-/// generating the final [`EffectShaders`], and is exposed mainly for debugging
-/// and inspection (editor). In general, you don't need to use this type
-/// directly.
+/// Generated from an [`EffectAsset`] by applying all its modifiers: two self-contained
+/// modules (aurora compiles each with slangc), the init kernel (`init`) and the update kernel
+/// (`update`, which also runs the render modifiers and writes the particles' instance rows).
+/// Exposed for debugging and inspection (editor).
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EffectShaderSources {
-    /// WESL source code for the init compute shader.
+    /// Slang source of the init kernel.
     pub init_shader_source: String,
-    /// WESL source code for the update compute shader.
+    /// Slang source of the update kernel.
     pub update_shader_source: String,
-    /// WESL source code for the render graphics shader (both vertex and
-    /// fragment).
-    pub render_shader_source: String,
-    /// Effect flags the source codes were generated with.
+    /// Effect flags the sources were generated with.
     pub layout_flags: LayoutFlags,
 }
 
@@ -1218,7 +991,7 @@ impl EffectShaderSources {
         let parent_particle_code = parent_layout
             .map(|layout| {
                 format!(
-                    "@if(READ_PARENT_PARTICLE)\nstruct ParentParticle {{\n{}\n}}",
+                    "struct ParentParticle {{\n{}}};",
                     layout.generate_code()
                 )
             })
@@ -1238,7 +1011,7 @@ impl EffectShaderSources {
             if attr == Attribute::SIZE {
                 if !has_size {
                     inputs_code += &format!(
-                        "var size = vec3<f32>(particle.{0}, particle.{0}, particle.{0});\n",
+                        "var size = float3(particle.{0}, particle.{0}, particle.{0});\n",
                         Attribute::SIZE.name()
                     );
                     has_size = true;
@@ -1249,7 +1022,7 @@ impl EffectShaderSources {
             } else if attr == Attribute::SIZE2 {
                 if !has_size {
                     inputs_code += &format!(
-                        "var size = vec3<f32>(particle.{0}, 1.0);\n",
+                        "var size = float3(particle.{0}, 1.0);\n",
                         Attribute::SIZE2.name()
                     );
                     has_size = true;
@@ -1295,20 +1068,20 @@ impl EffectShaderSources {
         if !has_size {
             inputs_code += &format!(
                 "var size = {0};\n",
-                Attribute::SIZE3.default_value().to_wgsl_string() // TODO - or SIZE?
+                Attribute::SIZE3.default_value().to_slang_string() // TODO - or SIZE?
             );
         }
         if !has_color {
             inputs_code += &format!(
                 "var color = {};\n",
-                Attribute::HDR_COLOR.default_value().to_wgsl_string() // TODO - or COLOR?
+                Attribute::HDR_COLOR.default_value().to_slang_string() // TODO - or COLOR?
             );
         }
         for &attr in required_attributes.difference(&present_attributes) {
             inputs_code += &format!(
                 "var {} = {};\n",
                 attr.name(),
-                attr.default_value().to_wgsl_string()
+                attr.default_value().to_slang_string()
             );
         }
 
@@ -1316,57 +1089,14 @@ impl EffectShaderSources {
         let property_layout = asset.property_layout();
         let properties_code = property_layout
             .generate_property_struct_code()
-            .unwrap_or_default();
-        let properties_binding_code = if property_layout.is_empty() {
-            "// (no properties)".to_string()
-        } else {
-            "@group(2) @binding(3) var<storage, read> properties : array<Properties>;".to_string()
-        };
-
-        // Generate the shader code defining the material bindings. These occupy the
-        // @group(2) @binding(4..) range.
+            .unwrap_or_else(|| "struct Properties {\n    uint _unused;\n};\n".to_string());
         let texture_layout = asset.texture_layout();
-        let material_bindings_code = texture_layout.to_wgsl_binding(2, 4);
 
-        // Event buffer bindings for the update pass, if the effect emits GPU events to
-        // one or more other effects.
-        let mut emit_event_buffer_bindings_code = String::with_capacity(256);
-        emit_event_buffer_bindings_code.push_str(
-            "@if(EMITS_GPU_SPAWN_EVENTS)\n@group(3) @binding(1) var<storage, read_write> child_info_buffer : ChildInfoBuffer;\n",
-        );
-        let mut emit_event_buffer_append_funcs_code = String::with_capacity(1024);
-        let base_binding_index = 2;
-        for i in 0..num_event_bindings {
-            let binding_index = base_binding_index + i;
-            emit_event_buffer_bindings_code.push_str(&format!(
-                "@if(EMITS_GPU_SPAWN_EVENTS)\n@group(3) @binding({binding_index}) var<storage, read_write> event_buffer_{i} : EventBuffer;\n"));
-            emit_event_buffer_append_funcs_code.push_str(&format!(
-                r##"/// Append one or more spawn events to the event buffer.
-@if(EMITS_GPU_SPAWN_EVENTS)
-fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u32) {{
-    // Optimize this case.
-    if (count == 0u) {{
-        return;
-    }}
-
-    let capacity = arrayLength(&event_buffer_{0}.spawn_events);
-    let base = min(u32(atomicAdd(&child_info_buffer.rows[base_child_index + {0}].event_count, i32(count))), capacity);
-    let capped_count = min(count, capacity - base);
-    for (var i = 0u; i < capped_count; i += 1u) {{
-        event_buffer_{0}.spawn_events[base + i].particle_index = particle_index;
-    }}
-}}
-"##,
-                i,
-            ));
-        }
-        emit_event_buffer_bindings_code.pop();
-        if emit_event_buffer_bindings_code.is_empty() {
-            emit_event_buffer_bindings_code = "// (not emitting GPU events)".into();
-        }
-        emit_event_buffer_append_funcs_code.pop();
-        if emit_event_buffer_append_funcs_code.is_empty() {
-            emit_event_buffer_append_funcs_code = "// (not emitting GPU events)".into();
+        if num_event_bindings > 0 {
+            warn!(
+                "Effect '{}' has {} child effect(s): GPU spawn events are not on aurora yet.",
+                asset.name, num_event_bindings
+            );
         }
 
         // Start from the base module containing the expressions actually serialized in
@@ -1428,18 +1158,21 @@ fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u3
             )
         };
 
-        let init_shader_source = PARTICLES_INIT_SHADER_TEMPLATE
-            .replace("{{ATTRIBUTES}}", &attributes_code)
-            .replace("{{PARENT_PARTICLE}}", &parent_particle_code)
-            .replace("{{INIT_CODE}}", &init_code)
-            .replace("{{INIT_EXTRA}}", &init_extra)
-            .replace("{{PROPERTIES}}", &properties_code)
-            .replace("{{PROPERTIES_BINDING}}", &properties_binding_code)
-            .replace("{{MATERIAL_BINDINGS}}", &material_bindings_code)
-            .replace(
-                "{{SIMULATION_SPACE_TRANSFORM_PARTICLE}}",
-                &init_sim_space_transform_code,
-            );
+        let local_space = asset.simulation_space == SimulationSpace::Local;
+        let common = effect_common_source(
+            local_space,
+            &attributes_code,
+            &parent_particle_code,
+            &properties_code,
+        );
+        let init_shader_source = common.clone()
+            + &PARTICLES_INIT_SHADER_TEMPLATE
+                .replace("{{INIT_CODE}}", &init_code)
+                .replace("{{INIT_EXTRA}}", &init_extra)
+                .replace(
+                    "{{SIMULATION_SPACE_TRANSFORM_PARTICLE}}",
+                    &init_sim_space_transform_code,
+                );
         trace!(
             "Configured init shader for '{}':\n{}",
             asset.name,
@@ -1545,11 +1278,11 @@ fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u3
 
                     // In Debug, show everything to help diagnosing
                     #[cfg(debug_assertions)]
-                    return 1_f32.to_wgsl_string();
+                    return 1_f32.to_slang_string();
 
                     // In Release, hide everything with an error
                     #[cfg(not(debug_assertions))]
-                    return 0_f32.to_wgsl_string();
+                    return 0_f32.to_slang_string();
                 })
             } else {
                 // WESL parses disabled branches before conditional translation.
@@ -1562,12 +1295,12 @@ fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u3
             {
                 layout_flags |= LayoutFlags::FLIPBOOK;
                 // Note: row_count needs to be i32, not u32, because of sprite_index
-                let flipbook_row_count_code = (grid_size.x as i32).to_wgsl_string();
+                let flipbook_row_count_code = (grid_size.x as i32).to_slang_string();
                 let flipbook_scale_code =
-                    Vec2::new(1.0 / grid_size.x as f32, 1.0 / grid_size.y as f32).to_wgsl_string();
+                    Vec2::new(1.0 / grid_size.x as f32, 1.0 / grid_size.y as f32).to_slang_string();
                 (flipbook_scale_code, flipbook_row_count_code)
             } else {
-                ("vec2<f32>(1.0)".to_string(), "1i".to_string())
+                ("float2(1.0)".to_string(), "1i".to_string())
             };
 
             (
@@ -1634,7 +1367,7 @@ fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u3
         {
             writeln!(
                 &mut writeback_code,
-                "    particle_buffer.particles[base_particle + particle_index].{0} = particle.{0};",
+                "    push.particles[slot].{0} = particle.{0};",
                 attribute.name()
             )
             .unwrap();
@@ -1642,55 +1375,32 @@ fn append_spawn_events_{0}(base_child_index: u32, particle_index: u32, count: u3
 
         // Configure the update shader template, and make sure a corresponding shader
         // asset exists
-        let update_shader_source = PARTICLES_UPDATE_SHADER_TEMPLATE
-            .replace("{{ATTRIBUTES}}", &attributes_code)
-            .replace("{{PARENT_PARTICLE}}", &parent_particle_code)
-            .replace("{{AGE_CODE}}", &age_code)
-            .replace("{{REAP_CODE}}", &reap_code)
-            .replace("{{UPDATE_CODE}}", &update_code)
-            .replace("{{WRITEBACK_CODE}}", &writeback_code)
-            .replace("{{UPDATE_EXTRA}}", &update_extra)
-            .replace("{{PROPERTIES}}", &properties_code)
-            .replace("{{PROPERTIES_BINDING}}", &properties_binding_code)
-            .replace("{{MATERIAL_BINDINGS}}", &material_bindings_code)
-            .replace(
-                "{{EMIT_EVENT_BUFFER_BINDINGS}}",
-                &emit_event_buffer_bindings_code,
-            )
-            .replace(
-                "{{EMIT_EVENT_BUFFER_APPEND_FUNCS}}",
-                &emit_event_buffer_append_funcs_code,
+        if !fragment_code.trim().is_empty() {
+            warn!(
+                "Effect '{}' has fragment-stage render modifiers (textures, alpha), which aurora has not: ignored.",
+                asset.name
             );
+        }
+        let _ = (alpha_cutoff_code, flipbook_scale_code, flipbook_row_count_code);
+        let update_shader_source = common
+            + &PARTICLES_UPDATE_SHADER_TEMPLATE
+                .replace("{{AGE_CODE}}", &age_code)
+                .replace("{{REAP_CODE}}", &reap_code)
+                .replace("{{UPDATE_CODE}}", &update_code)
+                .replace("{{WRITEBACK_CODE}}", &writeback_code)
+                .replace("{{UPDATE_EXTRA}}", &update_extra)
+                .replace("{{INPUTS}}", &inputs_code)
+                .replace("{{VERTEX_MODIFIERS}}", &vertex_code)
+                .replace("{{RENDER_EXTRA}}", &render_extra);
         trace!(
             "Configured update shader for '{}':\n{}",
             asset.name,
             update_shader_source
         );
 
-        // Configure the render shader template, and make sure a corresponding shader
-        // asset exists
-        let render_shader_source = PARTICLES_RENDER_SHADER_TEMPLATE
-            .replace("{{ATTRIBUTES}}", &attributes_code)
-            .replace("{{INPUTS}}", &inputs_code)
-            .replace("{{PROPERTIES}}", &properties_code)
-            .replace("{{PROPERTIES_BINDING}}", &properties_binding_code)
-            .replace("{{MATERIAL_BINDINGS}}", &material_bindings_code)
-            .replace("{{VERTEX_MODIFIERS}}", &vertex_code)
-            .replace("{{FRAGMENT_MODIFIERS}}", &fragment_code)
-            .replace("{{RENDER_EXTRA}}", &render_extra)
-            .replace("{{ALPHA_CUTOFF}}", &alpha_cutoff_code)
-            .replace("{{FLIPBOOK_SCALE}}", &flipbook_scale_code)
-            .replace("{{FLIPBOOK_ROW_COUNT}}", &flipbook_row_count_code);
-        trace!(
-            "Configured render shader for '{}':\n{}",
-            asset.name,
-            render_shader_source
-        );
-
         Ok(EffectShaderSources {
             init_shader_source,
             update_shader_source,
-            render_shader_source,
             layout_flags,
         })
     }
@@ -1720,10 +1430,10 @@ pub struct CompiledParticleEffect {
     /// Cached simulation condition, to avoid having to query the asset each
     /// time we need it.
     simulation_condition: SimulationCondition,
-    /// A custom mesh for this effect, if specified.
-    mesh: Option<Handle<Mesh>>,
-    /// Handle to the effect shaders for his effect instance, if configured.
-    effect_shader: Option<EffectShaders>,
+    /// A custom mesh for this effect, if specified (else an analytic sphere).
+    mesh: Option<Handle<bevy_aurora::mesh::AuroraMesh>>,
+    /// The Slang source of its kernels, once generated.
+    sources: Option<EffectShaderSources>,
     /// Textures used by the effect, if any.
     textures: Vec<Handle<Image>>,
     /// Layout flags.
@@ -1746,7 +1456,7 @@ impl Default for CompiledParticleEffect {
             children: vec![],
             simulation_condition: SimulationCondition::default(),
             mesh: None,
-            effect_shader: None,
+            sources: None,
             textures: vec![],
             layout_flags: LayoutFlags::NONE,
             alpha_mode: default(),
@@ -1773,7 +1483,7 @@ impl CompiledParticleEffect {
     /// Clear the compiled data from this component.
     pub(crate) fn clear(&mut self) {
         self.asset = Handle::default();
-        self.effect_shader = None;
+        self.sources = None;
         self.textures.clear();
     }
 
@@ -1789,8 +1499,6 @@ impl CompiledParticleEffect {
         child_entities: Vec<Entity>,
         parent_layout: Option<ParticleLayout>,
         asset_server: &AssetServer,
-        shaders: &mut ResMut<Assets<Shader>>,
-        shader_cache: &mut ResMut<ShaderCache>,
     ) {
         trace!(
             "Updating (rebuild:{}) compiled particle effect '{}' ({:?})",
@@ -1820,11 +1528,11 @@ impl CompiledParticleEffect {
             // Clear the compiled effect if the effect instance changed. We could try to get
             // smarter here, only invalidate what changed, but for now just wipe everything
             // and rebuild from scratch all three shaders together.
-            self.effect_shader = None;
+            self.sources = None;
         }
 
         // If the shaders are already compiled, there's nothing more to do
-        if self.effect_shader.is_some() {
+        if self.sources.is_some() {
             return;
         }
 
@@ -1856,40 +1564,12 @@ impl CompiledParticleEffect {
             self.alpha_mode
         );
 
-        // TODO - Replace with Option<EffectShader { handle: Handle<Shader>, hash:
-        // u64 }> where the hash takes into account the code and extra code
-        // for each pass (and any other varying item). We don't need to keep
-        // around the entire shader code, only a hash of it for compare (or, maybe safer
-        // to avoid hash collisions, an index into a shader cache). The only
-        // use is to be able to compare 2 instances and see if they can be
-        // batched together.
-        self.effect_shader = Some(EffectShaders {
-            init: shader_cache.get_or_insert(
-                &asset.name,
-                "init",
-                &shader_source.init_shader_source,
-                shaders,
-            ),
-            update: shader_cache.get_or_insert(
-                &asset.name,
-                "update",
-                &shader_source.update_shader_source,
-                shaders,
-            ),
-            render: shader_cache.get_or_insert(
-                &asset.name,
-                "render",
-                &shader_source.render_shader_source,
-                shaders,
-            ),
-        });
-
         trace!(
-            "CompiledParticleEffect::update(): shaders={:?} texture_count={} layout_flags={:?}",
-            self.effect_shader.as_ref().unwrap(),
+            "CompiledParticleEffect::update(): texture_count={} layout_flags={:?}",
             material.map(|mat| mat.images.len()).unwrap_or(0),
             self.layout_flags,
         );
+        self.sources = Some(shader_source);
 
         if let Some(mesh) = mesh {
             self.mesh = Some(mesh.0.clone());
@@ -1897,27 +1577,65 @@ impl CompiledParticleEffect {
             self.mesh = asset
                 .mesh
                 .as_ref()
-                .map(|path: &bevy::asset::AssetPath<'_>| asset_server.load::<Mesh>(path));
+                .map(|path: &bevy::asset::AssetPath<'_>| asset_server.load(path));
         }
 
         self.textures = material.map(|mat| &mat.images).cloned().unwrap_or_default();
     }
 
-    /// Get the effect shader if configured, or `None` otherwise.
-    ///
-    /// The returned assets are the shaders actually compiled and used. You
-    /// should never mutate those shader assets directly; changing them without
-    /// updating the rest of the effect will cause discrepancies in the render
-    /// pipeline and most likely panics and crashes. This getter is provided
-    /// mainly for debugging and inspection (editor).
-    pub fn get_configured_shaders(&self) -> Option<&EffectShaders> {
-        self.effect_shader.as_ref()
+    /// The Slang source of the effect's kernels, once generated (debugging, editor).
+    pub fn sources(&self) -> Option<&EffectShaderSources> {
+        self.sources.as_ref()
+    }
+
+    /// The effect asset it was compiled from.
+    pub(crate) fn asset(&self) -> &Handle<EffectAsset> {
+        &self.asset
+    }
+
+    /// The mesh override, if any.
+    pub(crate) fn mesh(&self) -> Option<&Handle<bevy_aurora::mesh::AuroraMesh>> {
+        self.mesh.as_ref()
+    }
+
+    /// The PRNG seed of this frame.
+    pub(crate) fn prng_seed(&self) -> u32 {
+        self.prng_seed
+    }
+
+    /// When the effect simulates.
+    pub(crate) fn simulation_condition(&self) -> SimulationCondition {
+        self.simulation_condition
+    }
+
+    /// Mark the effect ready (its kernels built and storage allocated).
+    pub(crate) fn set_ready(&mut self, ready: bool) {
+        self.is_ready = ready;
     }
 }
 
-const PARTICLES_INIT_SHADER_TEMPLATE: &str = include_str!("render/vfx_init.wesl");
-const PARTICLES_UPDATE_SHADER_TEMPLATE: &str = include_str!("render/vfx_update.wesl");
-const PARTICLES_RENDER_SHADER_TEMPLATE: &str = include_str!("render/vfx_render.wesl");
+const HANABI_COMMON: &str = include_str!("shaders/hanabi_common.slang");
+const EFFECT_COMMON_TEMPLATE: &str = include_str!("shaders/effect_common.slang");
+const PARTICLES_INIT_SHADER_TEMPLATE: &str = include_str!("shaders/effect_init.slang");
+const PARTICLES_UPDATE_SHADER_TEMPLATE: &str = include_str!("shaders/effect_update.slang");
+
+/// What both of an effect's modules start with: its flags, the shared helpers, its particle and
+/// property structs and its storage (`effect_common.slang`).
+fn effect_common_source(
+    local_space: bool,
+    attributes_code: &str,
+    parent_particle_code: &str,
+    properties_code: &str,
+) -> String {
+    format!(
+        "#define LOCAL_SPACE_SIMULATION {}\n\n{HANABI_COMMON}\n{}\n",
+        local_space as u32,
+        EFFECT_COMMON_TEMPLATE
+            .replace("{{ATTRIBUTES}}", attributes_code)
+            .replace("{{PARENT_PARTICLE}}", parent_particle_code)
+            .replace("{{PROPERTIES}}", properties_code)
+    )
+}
 
 /// Trait to convert any data structure to its equivalent shader code.
 trait ShaderCode {
@@ -1928,7 +1646,7 @@ trait ShaderCode {
 impl ShaderCode for Gradient<Vec2> {
     fn to_shader_code(&self, input: &str) -> String {
         if self.keys().is_empty() {
-            return String::new();
+            return format!("return {};\n", Vec2::ZERO.to_slang_string());
         }
         let mut s: String = self
             .keys()
@@ -1938,8 +1656,8 @@ impl ShaderCode for Gradient<Vec2> {
                 format!(
                     "let t{0} = {1};\nlet v{0} = {2};",
                     index,
-                    key.ratio().to_wgsl_string(),
-                    key.value.to_wgsl_string()
+                    key.ratio().to_slang_string(),
+                    key.value.to_slang_string()
                 )
             })
             .fold("// Gradient\n".into(), |s, key| s + &key + "\n");
@@ -1954,7 +1672,7 @@ impl ShaderCode for Gradient<Vec2> {
                 .enumerate()
                 .map(|(index, _key)| {
                     format!(
-                        "else if ({input} <= t{1}) {{ return mix(v{0}, v{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
+                        "else if ({input} <= t{1}) {{ return lerp(v{0}, v{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
                         index,
                         index + 1
                     )
@@ -1969,7 +1687,7 @@ impl ShaderCode for Gradient<Vec2> {
 impl ShaderCode for Gradient<Vec3> {
     fn to_shader_code(&self, input: &str) -> String {
         if self.keys().is_empty() {
-            return String::new();
+            return format!("return {};\n", Vec3::ZERO.to_slang_string());
         }
         let mut s: String = self
             .keys()
@@ -1979,8 +1697,8 @@ impl ShaderCode for Gradient<Vec3> {
                 format!(
                     "let t{0} = {1};\nlet v{0} = {2};",
                     index,
-                    key.ratio().to_wgsl_string(),
-                    key.value.to_wgsl_string()
+                    key.ratio().to_slang_string(),
+                    key.value.to_slang_string()
                 )
             })
             .fold("// Gradient\n".into(), |s, key| s + &key + "\n");
@@ -1995,7 +1713,7 @@ impl ShaderCode for Gradient<Vec3> {
                 .enumerate()
                 .map(|(index, _key)| {
                     format!(
-                        "else if ({input} <= t{1}) {{ return mix(v{0}, v{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
+                        "else if ({input} <= t{1}) {{ return lerp(v{0}, v{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
                         index,
                         index + 1
                     )
@@ -2010,7 +1728,7 @@ impl ShaderCode for Gradient<Vec3> {
 impl ShaderCode for Gradient<Vec4> {
     fn to_shader_code(&self, input: &str) -> String {
         if self.keys().is_empty() {
-            return String::new();
+            return format!("return {};\n", Vec4::ZERO.to_slang_string());
         }
         let mut s: String = self
             .keys()
@@ -2020,8 +1738,8 @@ impl ShaderCode for Gradient<Vec4> {
                 format!(
                     "let t{0} = {1};\nlet c{0} = {2};",
                     index,
-                    key.ratio().to_wgsl_string(),
-                    key.value.to_wgsl_string()
+                    key.ratio().to_slang_string(),
+                    key.value.to_slang_string()
                 )
             })
             .fold("// Gradient\n".into(), |s, key| s + &key + "\n");
@@ -2036,7 +1754,7 @@ impl ShaderCode for Gradient<Vec4> {
                 .enumerate()
                 .map(|(index, _key)| {
                     format!(
-                        "else if ({input} <= t{1}) {{ return mix(c{0}, c{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
+                        "else if ({input} <= t{1}) {{ return lerp(c{0}, c{1}, ({input} - t{0}) / (t{1} - t{0})); }}\n",
                         index,
                         index + 1
                     )
@@ -2064,8 +1782,6 @@ impl ShaderCode for Gradient<Vec4> {
 fn compile_effects(
     asset_server: Res<AssetServer>,
     effects: Res<Assets<EffectAsset>>,
-    mut shaders: ResMut<Assets<Shader>>,
-    mut shader_cache: ResMut<ShaderCache>,
     mut q_effects: Query<(
         Entity,
         Ref<ParticleEffect>,
@@ -2167,8 +1883,6 @@ fn compile_effects(
                 child_entities,
                 parent_layout,
                 &asset_server,
-                &mut shaders,
-                &mut shader_cache,
             );
         } else {
             // Update the PRNG seed. Unfortunately at the minute the "seed" (which
@@ -2242,7 +1956,7 @@ mod tests {
                 memory::{Dir, MemoryAssetReader},
                 AssetSourceBuilder, AssetSourceBuilders, AssetSourceId,
             },
-            AssetServerMode, LoadState, UnapprovedPathMode,
+            AssetServerMode, UnapprovedPathMode,
         },
         camera::visibility::{VisibilityPlugin, VisibilitySystems},
         tasks::{IoTaskPool, TaskPoolBuilder},
@@ -2282,118 +1996,118 @@ mod tests {
 
     #[test]
     fn to_wgsl_f32() {
-        let s = 1.0_f32.to_wgsl_string();
+        let s = 1.0_f32.to_slang_string();
         assert_eq!(s, "1.");
-        let s = (-1.0_f32).to_wgsl_string();
+        let s = (-1.0_f32).to_slang_string();
         assert_eq!(s, "-1.");
-        let s = 1.5_f32.to_wgsl_string();
+        let s = 1.5_f32.to_slang_string();
         assert_eq!(s, "1.5");
-        let s = 0.5_f32.to_wgsl_string();
+        let s = 0.5_f32.to_slang_string();
         assert_eq!(s, "0.5");
-        let s = 0.123_456_78_f32.to_wgsl_string();
+        let s = 0.123_456_78_f32.to_slang_string();
         assert_eq!(s, "0.123457"); // 6 digits
     }
 
     #[test]
     fn to_wgsl_f64() {
-        let s = 1.0_f64.to_wgsl_string();
+        let s = 1.0_f64.to_slang_string();
         assert_eq!(s, "1.");
-        let s = (-1.0_f64).to_wgsl_string();
+        let s = (-1.0_f64).to_slang_string();
         assert_eq!(s, "-1.");
-        let s = 1.5_f64.to_wgsl_string();
+        let s = 1.5_f64.to_slang_string();
         assert_eq!(s, "1.5");
-        let s = 0.5_f64.to_wgsl_string();
+        let s = 0.5_f64.to_slang_string();
         assert_eq!(s, "0.5");
-        let s = 0.123_456_789_012_345_67_f64.to_wgsl_string();
+        let s = 0.123_456_789_012_345_67_f64.to_slang_string();
         assert_eq!(s, "0.123456789012346"); // 15 digits
     }
 
     #[test]
     fn to_wgsl_vec() {
-        let s = Vec2::new(1., 2.).to_wgsl_string();
-        assert_eq!(s, "vec2<f32>(1.,2.)");
-        let s = Vec3::new(1., 2., -1.).to_wgsl_string();
-        assert_eq!(s, "vec3<f32>(1.,2.,-1.)");
-        let s = Vec4::new(1., 2., -1., 2.).to_wgsl_string();
-        assert_eq!(s, "vec4<f32>(1.,2.,-1.,2.)");
+        let s = Vec2::new(1., 2.).to_slang_string();
+        assert_eq!(s, "float2(1.,2.)");
+        let s = Vec3::new(1., 2., -1.).to_slang_string();
+        assert_eq!(s, "float3(1.,2.,-1.)");
+        let s = Vec4::new(1., 2., -1., 2.).to_slang_string();
+        assert_eq!(s, "float4(1.,2.,-1.,2.)");
     }
 
     #[test]
     fn to_wgsl_ivec() {
-        let s = IVec2::new(1, 2).to_wgsl_string();
-        assert_eq!(s, "vec2<i32>(1,2)");
-        let s = IVec3::new(1, 2, -1).to_wgsl_string();
-        assert_eq!(s, "vec3<i32>(1,2,-1)");
-        let s = IVec4::new(1, 2, -1, 2).to_wgsl_string();
-        assert_eq!(s, "vec4<i32>(1,2,-1,2)");
+        let s = IVec2::new(1, 2).to_slang_string();
+        assert_eq!(s, "int2(1,2)");
+        let s = IVec3::new(1, 2, -1).to_slang_string();
+        assert_eq!(s, "int3(1,2,-1)");
+        let s = IVec4::new(1, 2, -1, 2).to_slang_string();
+        assert_eq!(s, "int4(1,2,-1,2)");
     }
 
     #[test]
     fn to_wgsl_uvec() {
-        let s = UVec2::new(1, 2).to_wgsl_string();
-        assert_eq!(s, "vec2<u32>(1u,2u)");
-        let s = UVec3::new(1, 2, 42).to_wgsl_string();
-        assert_eq!(s, "vec3<u32>(1u,2u,42u)");
-        let s = UVec4::new(1, 2, 42, 5).to_wgsl_string();
-        assert_eq!(s, "vec4<u32>(1u,2u,42u,5u)");
+        let s = UVec2::new(1, 2).to_slang_string();
+        assert_eq!(s, "uint2(1u,2u)");
+        let s = UVec3::new(1, 2, 42).to_slang_string();
+        assert_eq!(s, "uint3(1u,2u,42u)");
+        let s = UVec4::new(1, 2, 42, 5).to_slang_string();
+        assert_eq!(s, "uint4(1u,2u,42u,5u)");
     }
 
     #[test]
     fn to_wgsl_bvec() {
-        let s = BVec2::new(false, true).to_wgsl_string();
-        assert_eq!(s, "vec2<bool>(false,true)");
-        let s = BVec3::new(false, true, true).to_wgsl_string();
-        assert_eq!(s, "vec3<bool>(false,true,true)");
-        let s = BVec4::new(false, true, true, false).to_wgsl_string();
-        assert_eq!(s, "vec4<bool>(false,true,true,false)");
+        let s = BVec2::new(false, true).to_slang_string();
+        assert_eq!(s, "bool2(false,true)");
+        let s = BVec3::new(false, true, true).to_slang_string();
+        assert_eq!(s, "bool3(false,true,true)");
+        let s = BVec4::new(false, true, true, false).to_slang_string();
+        assert_eq!(s, "bool4(false,true,true,false)");
     }
 
     #[test]
     fn to_wgsl_value_f32() {
-        let s = CpuValue::Single(1.0_f32).to_wgsl_string();
+        let s = CpuValue::Single(1.0_f32).to_slang_string();
         assert_eq!(s, "1.");
-        let s = CpuValue::Uniform((1.0_f32, 2.0_f32)).to_wgsl_string();
+        let s = CpuValue::Uniform((1.0_f32, 2.0_f32)).to_slang_string();
         assert_eq!(s, "(frand() * (2. - 1.) + 1.)");
     }
 
     #[test]
     fn to_wgsl_value_vec2() {
-        let s = CpuValue::Single(Vec2::ONE).to_wgsl_string();
-        assert_eq!(s, "vec2<f32>(1.,1.)");
-        let s = CpuValue::Uniform((Vec2::ZERO, Vec2::ONE)).to_wgsl_string();
+        let s = CpuValue::Single(Vec2::ONE).to_slang_string();
+        assert_eq!(s, "float2(1.,1.)");
+        let s = CpuValue::Uniform((Vec2::ZERO, Vec2::ONE)).to_slang_string();
         assert_eq!(
             s,
-            "(frand2() * (vec2<f32>(1.,1.) - vec2<f32>(0.,0.)) + vec2<f32>(0.,0.))"
+            "(frand2() * (float2(1.,1.) - float2(0.,0.)) + float2(0.,0.))"
         );
     }
 
     #[test]
     fn to_wgsl_value_vec3() {
-        let s = CpuValue::Single(Vec3::ONE).to_wgsl_string();
-        assert_eq!(s, "vec3<f32>(1.,1.,1.)");
-        let s = CpuValue::Uniform((Vec3::ZERO, Vec3::ONE)).to_wgsl_string();
+        let s = CpuValue::Single(Vec3::ONE).to_slang_string();
+        assert_eq!(s, "float3(1.,1.,1.)");
+        let s = CpuValue::Uniform((Vec3::ZERO, Vec3::ONE)).to_slang_string();
         assert_eq!(
             s,
-            "(frand3() * (vec3<f32>(1.,1.,1.) - vec3<f32>(0.,0.,0.)) + vec3<f32>(0.,0.,0.))"
+            "(frand3() * (float3(1.,1.,1.) - float3(0.,0.,0.)) + float3(0.,0.,0.))"
         );
     }
 
     #[test]
     fn to_wgsl_value_vec4() {
-        let s = CpuValue::Single(Vec4::ONE).to_wgsl_string();
-        assert_eq!(s, "vec4<f32>(1.,1.,1.,1.)");
-        let s = CpuValue::Uniform((Vec4::ZERO, Vec4::ONE)).to_wgsl_string();
-        assert_eq!(s, "(frand4() * (vec4<f32>(1.,1.,1.,1.) - vec4<f32>(0.,0.,0.,0.)) + vec4<f32>(0.,0.,0.,0.))");
+        let s = CpuValue::Single(Vec4::ONE).to_slang_string();
+        assert_eq!(s, "float4(1.,1.,1.,1.)");
+        let s = CpuValue::Uniform((Vec4::ZERO, Vec4::ONE)).to_slang_string();
+        assert_eq!(s, "(frand4() * (float4(1.,1.,1.,1.) - float4(0.,0.,0.,0.)) + float4(0.,0.,0.,0.))");
     }
 
     #[test]
     fn to_shader_code() {
         let mut grad = Gradient::new();
-        assert_eq!("", grad.to_shader_code("key"));
+        assert_eq!("return float4(0.,0.,0.,0.);\n", grad.to_shader_code("key"));
 
         grad.add_key(0.0, Vec4::splat(0.0));
         assert_eq!(
-            "// Gradient\nlet t0 = 0.;\nlet c0 = vec4<f32>(0.,0.,0.,0.);\nreturn c0;\n",
+            "// Gradient\nlet t0 = 0.;\nlet c0 = float4(0.,0.,0.,0.);\nreturn c0;\n",
             grad.to_shader_code("key")
         );
 
@@ -2401,11 +2115,11 @@ mod tests {
         assert_eq!(
             r#"// Gradient
 let t0 = 0.;
-let c0 = vec4<f32>(0.,0.,0.,0.);
+let c0 = float4(0.,0.,0.,0.);
 let t1 = 1.;
-let c1 = vec4<f32>(1.,0.,0.,1.);
+let c1 = float4(1.,0.,0.,1.);
 if (key <= t0) { return c0; }
-else if (key <= t1) { return mix(c0, c1, (key - t0) / (t1 - t0)); }
+else if (key <= t1) { return lerp(c0, c1, (key - t0) / (t1 - t0)); }
 else { return c1; }
 "#,
             grad.to_shader_code("key")
@@ -2484,8 +2198,8 @@ else { return c1; }
         );
 
         let global = SimulationSpace::Global.eval(&ctx).unwrap();
-        assert!(global.contains("vec4<f32>(particle.position, 1.0)"));
-        assert!(global.contains("vec4<f32>(particle.velocity, 0.0)"));
+        assert!(global.contains("float4(particle.position, 1.0)"));
+        assert!(global.contains("float4(particle.velocity, 0.0)"));
         assert!(!global.contains("transform[3]"));
 
         let local = SimulationSpace::Local.eval(&ctx).unwrap();
@@ -2522,9 +2236,7 @@ else { return c1; }
         // app.add_plugins(DefaultPlugins);
         app.init_asset::<Mesh>();
         app.init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>();
-        app.init_asset::<Shader>();
         app.add_plugins(VisibilityPlugin);
-        app.init_resource::<ShaderCache>();
         app.insert_resource(Random(new_rng()));
         app.init_asset::<EffectAsset>();
         app.add_systems(
@@ -2545,134 +2257,6 @@ else { return c1; }
     impl TestCase {
         fn new(visibility: Option<Visibility>) -> Self {
             Self { visibility }
-        }
-    }
-
-    #[test]
-    fn test_effect_shader_source() {
-        // Empty particle layout
-        let module = Module::default();
-        let asset = EffectAsset::new(256, SpawnerSettings::rate(32.0.into()), module)
-            .with_simulation_space(SimulationSpace::Local);
-        assert_eq!(asset.simulation_space, SimulationSpace::Local);
-        let res = EffectShaderSources::generate(&asset, None, 0);
-        assert!(res.is_err());
-        let err = res.err().unwrap();
-        assert!(matches!(err, ShaderGenerateError::Validate(_)));
-
-        // Missing Attribute::POSITION, currently mandatory for all effects
-        let mut module = Module::default();
-        let zero = module.lit(Vec3::ZERO);
-        let asset = EffectAsset::new(256, SpawnerSettings::rate(32.0.into()), module)
-            .init(SetAttributeModifier::new(Attribute::VELOCITY, zero));
-        assert!(asset.particle_layout().size() > 0);
-        let res = EffectShaderSources::generate(&asset, None, 0);
-        assert!(res.is_err());
-        let err = res.err().unwrap();
-        assert!(matches!(err, ShaderGenerateError::Validate(_)));
-
-        // Valid
-        let mut module = Module::default();
-        let zero = module.lit(Vec3::ZERO);
-        let asset = EffectAsset::new(256, SpawnerSettings::rate(32.0.into()), module)
-            .with_simulation_space(SimulationSpace::Local)
-            .init(SetAttributeModifier::new(Attribute::POSITION, zero));
-        assert_eq!(asset.simulation_space, SimulationSpace::Local);
-        let res = EffectShaderSources::generate(&asset, None, 0);
-        assert!(res.is_ok());
-        let shader_source = res.unwrap();
-        for (name, code) in [
-            ("Init", shader_source.init_shader_source),
-            ("Update", shader_source.update_shader_source),
-            ("Render", shader_source.render_shader_source),
-        ] {
-            println!("{} shader:\n\n{}", name, code);
-
-            let mut modules = Vec::<(String, String)>::new();
-
-            // Import bevy_render::view for the render shader
-            {
-                // Load Bevy's actual view shader for the WESL resolver without
-                // creating a GPU device.
-                IoTaskPool::get_or_init(|| {
-                    TaskPoolBuilder::default()
-                        .num_threads(1)
-                        .thread_name("Hanabi test IO Task Pool".to_string())
-                        .build()
-                });
-                let mut dummy_app = App::new();
-                dummy_app.add_plugins(bevy::asset::AssetPlugin::default());
-                dummy_app.add_plugins(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::WgpuSettings {
-                        backends: None,
-                        ..default()
-                    }
-                    .into(),
-                    ..default()
-                });
-                let asset_server = dummy_app.world().resource::<AssetServer>();
-                let view_shader_handle =
-                    asset_server.load::<Shader>("embedded://bevy_render/view.wesl");
-
-                // Need at least one frame tick for the loaded asset to send a message to the
-                // asset server to get registered
-                let mut max_frames = 10000; // it takes a decent amount of time to load async the asset, even if embedded
-                while max_frames > 0 {
-                    dummy_app.world_mut().run_schedule(PreUpdate);
-
-                    let asset_server = dummy_app.world().resource::<AssetServer>();
-                    let load_state = asset_server.get_load_state(&view_shader_handle).unwrap();
-                    if let LoadState::Failed(err) = load_state {
-                        panic!("Load failed: {:?}", err);
-                    }
-                    if matches!(load_state, LoadState::Loaded) {
-                        break;
-                    }
-
-                    max_frames -= 1;
-                }
-                assert!(max_frames > 0);
-
-                let shaders = dummy_app.world().get_resource::<Assets<Shader>>().unwrap();
-                let view_shader = shaders.get(&view_shader_handle).unwrap();
-
-                modules.push((
-                    "bevy_render::view".into(),
-                    view_shader.source.as_str().into(),
-                ));
-            }
-
-            // Import bevy_hanabi::vfx_common
-            {
-                let min_storage_buffer_offset_alignment = 256;
-                let common_shader =
-                    HanabiPlugin::make_common_shader(min_storage_buffer_offset_alignment);
-                modules.push((
-                    "bevy_hanabi::render::vfx_common".into(),
-                    common_shader.source.as_str().into(),
-                ));
-            }
-
-            let wgsl = crate::test_utils::compile_wesl(
-                &code,
-                &[
-                    "LOCAL_SPACE_SIMULATION",
-                    "NEEDS_UV",
-                    "PARTICLE_SCREEN_SPACE_SIZE",
-                ],
-                &modules
-                    .iter()
-                    .map(|(path, source)| (path.as_str(), source.as_str()))
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|error| panic!("{}", error.diagnostic().render_plain()));
-            let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::default(),
-            )
-            .validate(&module)
-            .unwrap();
         }
     }
 
@@ -2714,7 +2298,7 @@ else { return c1; }
                 compiled_particle_effect.asset,
                 Handle::<EffectAsset>::default()
             );
-            assert!(compiled_particle_effect.effect_shader.is_none());
+            assert!(compiled_particle_effect.sources.is_none());
         }
     }
 
@@ -2769,7 +2353,7 @@ else { return c1; }
             // `compile_effects()` always updates the CompiledParticleEffect
             assert_eq!(compiled_particle_effect.asset, handle);
             assert!(compiled_particle_effect.asset.is_strong());
-            assert!(compiled_particle_effect.effect_shader.is_some());
+            assert!(compiled_particle_effect.sources.is_some());
         }
 
         // Mark as changed without actually changing anything
@@ -2804,7 +2388,7 @@ else { return c1; }
             // `compile_effects()` always updates the CompiledParticleEffect
             assert_eq!(compiled_particle_effect.asset, handle);
             assert!(compiled_particle_effect.asset.is_strong());
-            assert!(compiled_particle_effect.effect_shader.is_some());
+            assert!(compiled_particle_effect.sources.is_some());
         }
     }
 
@@ -2901,7 +2485,7 @@ else { return c1; }
                 // even if hidden
                 assert_eq!(compiled_particle_effect.asset, handle);
                 assert!(compiled_particle_effect.asset.is_strong());
-                assert!(compiled_particle_effect.effect_shader.is_some());
+                assert!(compiled_particle_effect.sources.is_some());
 
                 // Toggle visibility and tick once more; this shouldn't panic (regression; #182)
                 let (mut visibility, _) = world
@@ -2929,127 +2513,9 @@ else { return c1; }
                 // `compile_effects()` always updates the CompiledParticleEffect
                 assert_eq!(compiled_particle_effect.asset, handle);
                 assert!(compiled_particle_effect.asset.is_strong());
-                assert!(compiled_particle_effect.effect_shader.is_some());
+                assert!(compiled_particle_effect.sources.is_some());
             }
         }
-    }
-
-    bitflags::bitflags! {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct LayerMatchFlags: u8 {
-            const EXACTLY_ONE = (1u8 << 0);
-            const ONE_OR_MORE = (1u8 << 1);
-            const EXACTLY_SIX = (1u8 << 2);
-            const MULTIPLE_OF_SIX = (1u8 << 3);
-        }
-    }
-
-    impl LayerMatchFlags {
-        pub fn accepts(&self, layer: u32) -> bool {
-            match *self {
-                Self::EXACTLY_ONE => layer == 1,
-                Self::ONE_OR_MORE => layer >= 1,
-                Self::EXACTLY_SIX => layer == 6,
-                Self::MULTIPLE_OF_SIX => layer.is_multiple_of(6),
-                _ => panic!(),
-            }
-        }
-    }
-
-    fn check_texslot(slot: &TextureSlot, accepts: (TextureDimension, LayerMatchFlags, bool)) {
-        for dim in [
-            TextureDimension::D1,
-            TextureDimension::D2,
-            TextureDimension::D3,
-        ] {
-            for layer in [1, 2, 6, 14, 18] {
-                for is_depth in [true, false] {
-                    let is_matching =
-                        (dim == accepts.0) && (is_depth == accepts.2) && accepts.1.accepts(layer);
-                    assert_eq!(
-                        slot.accepts(dim, layer, is_depth),
-                        is_matching,
-                        "Expected slot {slot:?} to accept={is_matching} for dim={dim:?}, layer={layer}, is_depth={is_depth}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn texslot_accepts() {
-        let slot_1d = TextureSlot {
-            name: "D1".to_string(),
-            dimension: SlotDimension::D1,
-        };
-        let accepts = (TextureDimension::D1, LayerMatchFlags::EXACTLY_ONE, false);
-        check_texslot(&slot_1d, accepts);
-
-        let slot_2d = TextureSlot {
-            name: "D2".to_string(),
-            dimension: SlotDimension::D2,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::EXACTLY_ONE, false);
-        check_texslot(&slot_2d, accepts);
-
-        let slot_2d_array = TextureSlot {
-            name: "D2Array".to_string(),
-            dimension: SlotDimension::D2Array,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::ONE_OR_MORE, false);
-        check_texslot(&slot_2d_array, accepts);
-
-        let slot_cube = TextureSlot {
-            name: "Cube".to_string(),
-            dimension: SlotDimension::Cube,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::EXACTLY_SIX, false);
-        check_texslot(&slot_cube, accepts);
-
-        let slot_cube_array = TextureSlot {
-            name: "CubeArray".to_string(),
-            dimension: SlotDimension::CubeArray,
-        };
-        let accepts = (
-            TextureDimension::D2,
-            LayerMatchFlags::MULTIPLE_OF_SIX,
-            false,
-        );
-        check_texslot(&slot_cube_array, accepts);
-
-        let slot_3d = TextureSlot {
-            name: "D3".to_string(),
-            dimension: SlotDimension::D3,
-        };
-        let accepts = (TextureDimension::D3, LayerMatchFlags::EXACTLY_ONE, false);
-        check_texslot(&slot_3d, accepts);
-
-        let slot_depth_2d = TextureSlot {
-            name: "DepthD2".to_string(),
-            dimension: SlotDimension::DepthD2,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::EXACTLY_ONE, true);
-        check_texslot(&slot_depth_2d, accepts);
-
-        let slot_depth_2d_array = TextureSlot {
-            name: "DepthD2Array".to_string(),
-            dimension: SlotDimension::DepthD2Array,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::ONE_OR_MORE, true);
-        check_texslot(&slot_depth_2d_array, accepts);
-
-        let slot_depth_cube = TextureSlot {
-            name: "DepthCube".to_string(),
-            dimension: SlotDimension::DepthCube,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::EXACTLY_SIX, true);
-        check_texslot(&slot_depth_cube, accepts);
-
-        let slot_depth_cube_array = TextureSlot {
-            name: "DepthCubeArray".to_string(),
-            dimension: SlotDimension::DepthCubeArray,
-        };
-        let accepts = (TextureDimension::D2, LayerMatchFlags::MULTIPLE_OF_SIX, true);
-        check_texslot(&slot_depth_cube_array, accepts);
     }
 
     #[test]
@@ -3083,50 +2549,4 @@ else { return c1; }
         }
     }
 
-    #[test]
-    fn slotdim_texture_type() {
-        for dim in [
-            SlotDimension::D1,
-            SlotDimension::D2,
-            SlotDimension::D2Array,
-            SlotDimension::Cube,
-            SlotDimension::CubeArray,
-            SlotDimension::D3,
-            SlotDimension::DepthD2,
-            SlotDimension::DepthD2Array,
-            SlotDimension::DepthCube,
-            SlotDimension::DepthCubeArray,
-        ] {
-            let tex = dim.to_wgsl_texture_type();
-
-            let slot_type = format!("{dim:?}")
-                .to_ascii_lowercase()
-                .replace("array", "_array")
-                .replace("depth", "depth_")
-                .replace("d1", "1d")
-                .replace("d2", "2d")
-                .replace("d3", "3d");
-
-            assert_eq!(tex, format!("texture_{slot_type}<f32>"));
-        }
-    }
-
-    #[test]
-    fn slotdim_sampler_type() {
-        for dim in [
-            SlotDimension::D1,
-            SlotDimension::D2,
-            SlotDimension::D2Array,
-            SlotDimension::Cube,
-            SlotDimension::CubeArray,
-            SlotDimension::D3,
-            SlotDimension::DepthD2,
-            SlotDimension::DepthD2Array,
-            SlotDimension::DepthCube,
-            SlotDimension::DepthCubeArray,
-        ] {
-            let sampler = dim.to_wgsl_sampler_type();
-            assert_eq!(sampler.contains("comparison"), dim.is_depth());
-        }
-    }
 }

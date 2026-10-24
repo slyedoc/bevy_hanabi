@@ -167,7 +167,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     graph::{ScalarValue, Value, VectorValue},
-    ToWgslString,
+    ToSlangString,
 };
 
 /// Scalar types.
@@ -226,19 +226,19 @@ impl ScalarType {
     }
 }
 
-impl ToWgslString for ScalarType {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for ScalarType {
+    fn to_slang_string(&self) -> String {
         match self {
             ScalarType::Bool => "bool",
-            ScalarType::Float => "f32",
-            ScalarType::Int => "i32",
-            ScalarType::Uint => "u32",
+            ScalarType::Float => "float",
+            ScalarType::Int => "int",
+            ScalarType::Uint => "uint",
         }
         .to_string()
     }
 }
 
-/// Vector type (`vecN<T>`).
+/// Vector type (`TN`, as Slang's `float3`).
 ///
 /// Describes the type of a vector, which is composed of 2 to 4 components of a
 /// same scalar type. This type corresponds to one of the valid vector types in
@@ -335,13 +335,13 @@ impl VectorType {
     }
 }
 
-impl ToWgslString for VectorType {
-    fn to_wgsl_string(&self) -> String {
-        format!("vec{}<{}>", self.count, self.elem_type.to_wgsl_string())
+impl ToSlangString for VectorType {
+    fn to_slang_string(&self) -> String {
+        format!("{}{}", self.elem_type.to_slang_string(), self.count)
     }
 }
 
-/// Floating-point matrix type (`matCxR<f32>`).
+/// Floating-point matrix type (`floatRxC`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize)]
 pub struct MatrixType {
     rows: u8,
@@ -350,7 +350,7 @@ pub struct MatrixType {
 
 impl Display for MatrixType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "mat{}x{}<f32>", self.cols, self.rows)
+        write!(f, "mat{}x{}<float>", self.cols, self.rows)
     }
 }
 
@@ -400,13 +400,8 @@ impl MatrixType {
     /// This corresponds to the size of a variable of that type when part of a
     /// struct in WGSL.
     pub const fn size(&self) -> usize {
-        // SizeOf(array<vecR, C>), which means matCx3 and matCx4 have same size
-        // https://gpuweb.github.io/gpuweb/wgsl/#alignment-and-size
-        if self.rows >= 3 {
-            self.cols() * VectorType::VEC4F.size()
-        } else {
-            self.cols() * VectorType::VEC2F.size()
-        }
+        // Slang's natural layout: rows of floats, packed.
+        self.cols() * self.rows() * 4
     }
 
     /// Alignment of a value of this type, in bytes.
@@ -420,14 +415,9 @@ impl MatrixType {
     }
 }
 
-impl ToWgslString for MatrixType {
-    fn to_wgsl_string(&self) -> String {
-        format!(
-            "mat{}x{}<{}>",
-            self.cols,
-            self.rows,
-            ScalarType::Float.to_wgsl_string()
-        )
+impl ToSlangString for MatrixType {
+    fn to_slang_string(&self) -> String {
+        format!("float{}x{}", self.rows, self.cols)
     }
 }
 
@@ -520,12 +510,12 @@ impl From<MatrixType> for ValueType {
     }
 }
 
-impl ToWgslString for ValueType {
-    fn to_wgsl_string(&self) -> String {
+impl ToSlangString for ValueType {
+    fn to_slang_string(&self) -> String {
         match self {
-            ValueType::Scalar(s) => s.to_wgsl_string(),
-            ValueType::Vector(v) => v.to_wgsl_string(),
-            ValueType::Matrix(m) => m.to_wgsl_string(),
+            ValueType::Scalar(s) => s.to_slang_string(),
+            ValueType::Vector(v) => v.to_slang_string(),
+            ValueType::Matrix(m) => m.to_slang_string(),
         }
     }
 }
@@ -1629,7 +1619,7 @@ impl std::fmt::Debug for AttributeLayout {
             "(+{}) {}: {}",
             self.offset,
             self.attribute.name(),
-            self.attribute.value_type().to_wgsl_string(),
+            self.attribute.value_type().to_slang_string(),
         ))
     }
 }
@@ -2050,37 +2040,36 @@ impl ParticleLayout {
 
     /// Generate the WGSL attribute code corresponding to the layout.
     pub fn generate_code(&self) -> String {
-        // assert!(self.layout.is_sorted_by_key(|entry| entry.offset));
-        self.layout
-            .iter()
-            .map(|entry| {
-                format!(
-                    "    {}: {},",
+        crate::slang_struct_members(
+            self.layout.iter().map(|entry| {
+                (
+                    entry.offset,
                     entry.attribute.name(),
-                    entry.attribute.value_type().to_wgsl_string()
+                    entry.attribute.value_type().to_slang_string(),
+                    entry.attribute.size() as u32,
                 )
-            })
-            .fold(String::new(), |mut a, b| {
-                a.reserve(b.len() + 1);
-                a.push_str(&b);
-                a.push('\n');
-                a
-            })
+            }),
+            if self.layout.is_empty() {
+                0
+            } else {
+                self.min_binding_size32().get()
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bevy::reflect::TypeRegistration;
-    use naga::{front::wgsl::Frontend, proc::Layouter};
+    use bevy::{
+        math::{Mat2, Mat3, Mat4},
+        reflect::TypeRegistration,
+    };
 
     use super::*;
 
-    // Ensure the size and alignment of all types conforms to the WGSL spec by
-    // querying naga as a reference.
+    // Every value type's literal compiles in Slang, at the size the layout gives it.
     #[test]
     fn value_type_align() {
-        let mut frontend = Frontend::new();
         for (value_type, value) in &[
             (
                 ValueType::Scalar(ScalarType::Float),
@@ -2122,53 +2111,29 @@ mod tests {
                 }),
                 Value::Vector(VectorValue::new_vec4(Vec4::new(-0.5, 3.458, 0., -53.))),
             ),
+            (
+                ValueType::Matrix(MatrixType::MAT2X2F),
+                Value::Matrix(Mat2::from_cols(Vec2::X, Vec2::new(2., 3.)).into()),
+            ),
+            (
+                ValueType::Matrix(MatrixType::MAT3X3F),
+                Value::Matrix(Mat3::from_cols(Vec3::X, Vec3::Y, Vec3::new(1., 2., 3.)).into()),
+            ),
+            (
+                ValueType::Matrix(MatrixType::MAT4X4F),
+                Value::Matrix(Mat4::from_translation(Vec3::new(1., 2., 3.)).into()),
+            ),
         ] {
-            //assert_eq!(value.value_type(), *value_type);
-
-            // Create a tiny WGSL snippet with the Value(Type) and parse it
-            let src = format!("fn main() {{\nlet x = {};\n}}", value.to_wgsl_string());
-            let res = frontend.parse(&src);
-            if let Err(err) = &res {
-                println!("Error: {:?}", err);
+            // The literal compiles to its type, whose size the GPU agrees with.
+            let src = format!(
+                "[shader(\"compute\")]\n[numthreads(1, 1, 1)]\nvoid main() {{\n    {ty} x = {lit};\n    static_assert(sizeof({ty}) == {size}, \"size\");\n}}\n",
+                ty = value_type.to_slang_string(),
+                lit = value.to_slang_string(),
+                size = value_type.size(),
+            );
+            if let Err(err) = crate::test_utils::slang_check(&src) {
+                panic!("{value_type:?}: {err}");
             }
-            assert!(res.is_ok());
-            let m = res.unwrap();
-            //println!("Module: {:?}", m);
-
-            // Retrieve the "x" constant and the size/align of its type
-            let (_main_handle, main) = m
-                .functions
-                .iter()
-                .find(|c| c.1.name == Some("main".to_string()))
-                .unwrap();
-            let (expr_handle, _expr_name) =
-                main.named_expressions.iter().find(|c| c.1 == "x").unwrap();
-            let expr = main.expressions.try_get(*expr_handle).unwrap();
-
-            match expr {
-                naga::ir::Expression::Literal(lit) => {
-                    // For the literals we support, this is true.
-                    assert_eq!(lit.width(), value_type.size() as u8);
-                    assert_eq!(lit.width(), value_type.align() as u8);
-                }
-                naga::ir::Expression::Compose { ty, .. } => {
-                    let (size, align) = {
-                        // Calculate the type layout according to WGSL
-                        let mut layouter = Layouter::default();
-                        assert!(layouter.update(m.to_ctx()).is_ok());
-                        let layout = layouter[*ty];
-                        (layout.size, layout.alignment)
-                    };
-
-                    // Compare WGSL layout with the one of Value(Type)
-                    assert_eq!(size, value_type.size() as u32);
-                    assert_eq!(
-                        align,
-                        naga::proc::Alignment::new(value_type.align() as u32).unwrap()
-                    );
-                }
-                _ => panic!(),
-            };
         }
     }
 
@@ -2263,10 +2228,10 @@ mod tests {
         assert_eq!(MatrixType::MAT3X2F.size(), 24);
         assert_eq!(MatrixType::MAT4X2F.size(), 32);
 
-        // vec3 rows are aligned on 16 bytes
-        assert_eq!(MatrixType::MAT2X3F.size(), 32);
-        assert_eq!(MatrixType::MAT3X3F.size(), 48);
-        assert_eq!(MatrixType::MAT4X3F.size(), 64);
+        // Packed rows (Slang's natural layout)
+        assert_eq!(MatrixType::MAT2X3F.size(), 24);
+        assert_eq!(MatrixType::MAT3X3F.size(), 36);
+        assert_eq!(MatrixType::MAT4X3F.size(), 48);
 
         assert_eq!(MatrixType::MAT2X4F.size(), 32);
         assert_eq!(MatrixType::MAT3X4F.size(), 48);
@@ -2566,9 +2531,9 @@ mod tests {
             let attr0 = &layout.layout[0];
             assert_eq!(attr0.offset, 0);
             assert!(layout.generate_code().starts_with(&format!(
-                "    {}: {},\n",
-                attr0.attribute.name(),
-                attr0.attribute.value_type().to_wgsl_string()
+                "    {} {};\n",
+                attr0.attribute.value_type().to_slang_string(),
+                attr0.attribute.name()
             )));
 
             // Align

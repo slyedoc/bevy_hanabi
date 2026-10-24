@@ -52,7 +52,7 @@ impl SetVelocityCircleModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -61,9 +61,9 @@ impl SetVelocityCircleModifier {
                 let speed = ctx.eval(m, self.speed)?;
 
                 Ok(format!(
-                    r##"    let delta = (*particle).{0} - ({1});
+                    r##"    let delta = particle.{0} - ({1});
     let radial = normalize(delta - dot(delta, {2}) * ({2}));
-    (*particle).{3} = radial * ({4});
+    particle.{3} = radial * ({4});
 "##,
                     Attribute::POSITION.name(),
                     center,
@@ -74,7 +74,7 @@ impl SetVelocityCircleModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }
@@ -195,7 +195,7 @@ impl SetVelocityTangentModifier {
 
         context.make_fn(
             &func_name,
-            "particle: ptr<function, Particle>",
+            "inout Particle particle",
             None,
             module,
             &mut |m: &mut Module, ctx: &mut dyn EvalContext| -> Result<String, ExprError> {
@@ -204,9 +204,9 @@ impl SetVelocityTangentModifier {
                 let speed = ctx.eval(m, self.speed)?;
 
                 Ok(format!(
-                    r##"    let radial = (*particle).{0} - ({1});
+                    r##"    let radial = particle.{0} - ({1});
     let tangent = normalize(cross({2}, radial));
-    (*particle).{3} = tangent * ({4});
+    particle.{3} = tangent * ({4});
 "##,
                     Attribute::POSITION.name(),
                     origin,
@@ -217,7 +217,7 @@ impl SetVelocityTangentModifier {
             },
         )?;
 
-        let code = format!("{}(&particle);\n", func_name);
+        let code = format!("{}(particle);\n", func_name);
 
         Ok(code)
     }

@@ -3,11 +3,9 @@ use bevy::asset::{io::Reader, AssetLoader, LoadContext};
 use bevy::reflect::TypeRegistry;
 use bevy::reflect::{TypePath, TypeRegistryArc};
 use bevy::{
-    asset::{Asset, Assets, Handle},
-    log::trace,
-    math::{Vec2, Vec3},
+    asset::Asset,
     platform::collections::HashSet,
-    prelude::{Component, Entity, FromWorld, Mesh, Plane3d, Resource, World},
+    prelude::{Component, Entity, FromWorld, World},
     reflect::Reflect,
     utils::default,
 };
@@ -15,7 +13,6 @@ use bevy::{ecs::reflect::AppTypeRegistry, reflect::serde::TypedReflectSerializer
 use serde::de::DeserializeSeed as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
 
 use crate::Modifiers;
 use crate::{
@@ -209,53 +206,6 @@ pub enum AlphaMode {
     Opaque,
 }
 
-impl From<AlphaMode> for BlendState {
-    fn from(value: AlphaMode) -> Self {
-        match value {
-            AlphaMode::Blend => BlendState::ALPHA_BLENDING,
-            AlphaMode::Premultiply => BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            AlphaMode::Add => BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent {
-                    src_factor: BlendFactor::Zero,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-            },
-            AlphaMode::Multiply => BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::Dst,
-                    dst_factor: BlendFactor::OneMinusSrcAlpha,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent::OVER,
-            },
-            _ => BlendState::ALPHA_BLENDING,
-        }
-    }
-}
-
-/// Default particle mesh, if not otherwise specified in [`EffectAsset::mesh`].
-///
-/// This defaults to a unit quad facing the Z axis.
-///
-/// [`EffectAsset`]: crate::EffectAsset
-#[derive(Debug, Clone, Resource)]
-pub struct DefaultMesh(pub Handle<Mesh>);
-
-impl FromWorld for DefaultMesh {
-    fn from_world(world: &mut World) -> Self {
-        let mut meshes = world.resource_mut::<Assets<Mesh>>();
-        let handle = meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(0.5)));
-        trace!("Created DefaultMesh(Plane3d/Z): handle={handle:?}");
-        Self(handle)
-    }
-}
-
 /// Asset describing a visual effect.
 ///
 /// An effect asset represents the description of an effect, intended to be
@@ -322,16 +272,8 @@ pub struct EffectAsset {
     module: Module,
     /// Alpha mode.
     pub alpha_mode: AlphaMode,
-    /// The mesh that each particle renders.
-    ///
-    /// The asset path must reference a [`Mesh`] asset. If `None`, the effect
-    /// uses the [`DefaultMesh`].
-    ///
-    /// Unlike previous versions of Hanabi, you cannot anymore assign a runtime
-    /// [`Handle<Mesh>`] to an [`EffectAsset`]; although this might be
-    /// convenient, this prevents serializing the asset, because not all assets
-    /// in the [`Assets<Mesh>`] resource correspond to an actual asset with a
-    /// path.
+    /// The mesh each particle traces as: an aurora mesh (`.aurora_mesh`) asset path, or `None`
+    /// for an analytic sphere (unit diameter, scaled by the particle's size).
     pub mesh: Option<AssetPath<'static>>,
 }
 
@@ -1371,42 +1313,6 @@ mod tests {
             effect.render_modifiers().count(),
             effect_serde.render_modifiers().count()
         );
-    }
-
-    #[test]
-    fn alpha_mode_blend_state() {
-        assert_eq!(BlendState::ALPHA_BLENDING, AlphaMode::Blend.into());
-        assert_eq!(
-            BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            AlphaMode::Premultiply.into()
-        );
-
-        let blend_state = BlendState {
-            color: BlendComponent {
-                src_factor: BlendFactor::SrcAlpha,
-                dst_factor: BlendFactor::One,
-                operation: BlendOperation::Add,
-            },
-            alpha: BlendComponent {
-                src_factor: BlendFactor::Zero,
-                dst_factor: BlendFactor::One,
-                operation: BlendOperation::Add,
-            },
-        };
-        assert_eq!(blend_state, AlphaMode::Add.into());
-
-        let blend_state = BlendState {
-            color: BlendComponent {
-                src_factor: BlendFactor::Dst,
-                dst_factor: BlendFactor::OneMinusSrcAlpha,
-                operation: BlendOperation::Add,
-            },
-            alpha: BlendComponent::OVER,
-        };
-        assert_eq!(blend_state, AlphaMode::Multiply.into());
-
-        let expr = Module::default().lit(0.5);
-        assert_eq!(BlendState::ALPHA_BLENDING, AlphaMode::Mask(expr).into());
     }
 
     // Regression test for #440
