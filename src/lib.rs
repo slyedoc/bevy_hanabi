@@ -197,7 +197,7 @@ pub mod graph;
 pub mod modifier;
 mod plugin;
 pub mod properties;
-mod aurora;
+mod flags;
 mod spawn;
 mod time;
 
@@ -214,7 +214,7 @@ pub use graph::*;
 pub use modifier::*;
 pub use plugin::{EffectSystems, HanabiPlugin};
 pub use properties::*;
-pub use aurora::LayoutFlags;
+pub use flags::LayoutFlags;
 pub use spawn::{tick_spawners, CpuValue, EffectSpawner, Random, SpawnerSettings};
 pub use time::{EffectSimulation, EffectSimulationTime};
 
@@ -889,15 +889,6 @@ impl TextureLayout {
     }
 }
 
-/// Optional mesh override for a particle effect.
-///
-/// Add this component to the same entity as a [`ParticleEffect`] to override the mesh each
-/// particle traces as (an [`AuroraMesh`]; the default is an analytic sphere).
-///
-/// [`AuroraMesh`]: bevy_aurora::mesh::AuroraMesh
-#[derive(Debug, Default, Clone, PartialEq, Component)]
-pub struct EffectMesh(pub Handle<bevy_aurora::mesh::AuroraMesh>);
-
 /// Slang source of an effect's kernels.
 ///
 /// Generated from an [`EffectAsset`] by applying all its modifiers: two self-contained
@@ -1430,8 +1421,6 @@ pub struct CompiledParticleEffect {
     /// Cached simulation condition, to avoid having to query the asset each
     /// time we need it.
     simulation_condition: SimulationCondition,
-    /// A custom mesh for this effect, if specified (else an analytic sphere).
-    mesh: Option<Handle<bevy_aurora::mesh::AuroraMesh>>,
     /// The Slang source of its kernels, once generated.
     sources: Option<EffectShaderSources>,
     /// Textures used by the effect, if any.
@@ -1455,7 +1444,6 @@ impl Default for CompiledParticleEffect {
             parent: None,
             children: vec![],
             simulation_condition: SimulationCondition::default(),
-            mesh: None,
             sources: None,
             textures: vec![],
             layout_flags: LayoutFlags::NONE,
@@ -1493,12 +1481,10 @@ impl CompiledParticleEffect {
         rebuild: bool,
         instance: &ParticleEffect,
         material: Option<&EffectMaterial>,
-        mesh: Option<&EffectMesh>,
         asset: &EffectAsset,
         parent_entity: Option<Entity>,
         child_entities: Vec<Entity>,
         parent_layout: Option<ParticleLayout>,
-        asset_server: &AssetServer,
     ) {
         trace!(
             "Updating (rebuild:{}) compiled particle effect '{}' ({:?})",
@@ -1571,15 +1557,6 @@ impl CompiledParticleEffect {
         );
         self.sources = Some(shader_source);
 
-        if let Some(mesh) = mesh {
-            self.mesh = Some(mesh.0.clone());
-        } else {
-            self.mesh = asset
-                .mesh
-                .as_ref()
-                .map(|path: &bevy::asset::AssetPath<'_>| asset_server.load(path));
-        }
-
         self.textures = material.map(|mat| &mat.images).cloned().unwrap_or_default();
     }
 
@@ -1589,27 +1566,23 @@ impl CompiledParticleEffect {
     }
 
     /// The effect asset it was compiled from.
-    pub(crate) fn asset(&self) -> &Handle<EffectAsset> {
+    pub fn asset(&self) -> &Handle<EffectAsset> {
         &self.asset
     }
 
-    /// The mesh override, if any.
-    pub(crate) fn mesh(&self) -> Option<&Handle<bevy_aurora::mesh::AuroraMesh>> {
-        self.mesh.as_ref()
-    }
-
     /// The PRNG seed of this frame.
-    pub(crate) fn prng_seed(&self) -> u32 {
+    pub fn prng_seed(&self) -> u32 {
         self.prng_seed
     }
 
     /// When the effect simulates.
-    pub(crate) fn simulation_condition(&self) -> SimulationCondition {
+    pub fn simulation_condition(&self) -> SimulationCondition {
         self.simulation_condition
     }
 
-    /// Mark the effect ready (its kernels built and storage allocated).
-    pub(crate) fn set_ready(&mut self, ready: bool) {
+    /// Mark the effect ready: the renderer's back end built its kernels and storage (spawners
+    /// tick only once it is).
+    pub fn set_ready(&mut self, ready: bool) {
         self.is_ready = ready;
     }
 }
@@ -1780,13 +1753,11 @@ impl ShaderCode for Gradient<Vec4> {
 /// becoming visible later need to be special casing. If you want to avoid
 /// compiling an effect, don't spawn it.
 fn compile_effects(
-    asset_server: Res<AssetServer>,
     effects: Res<Assets<EffectAsset>>,
     mut q_effects: Query<(
         Entity,
         Ref<ParticleEffect>,
         Option<Ref<EffectMaterial>>,
-        Option<Ref<EffectMesh>>,
         Option<Ref<EffectParent>>,
         &mut CompiledParticleEffect,
     )>,
@@ -1799,7 +1770,7 @@ fn compile_effects(
     // a declared parent but unresolved parent asset.
     let particle_layouts_and_parents: HashMap<Entity, (ParticleLayout, Option<Entity>)> = q_effects
         .iter()
-        .filter_map(|(entity, effect, _, _, parent, _)| {
+        .filter_map(|(entity, effect, _, parent, _)| {
             effects
                 .get(&effect.handle)
                 .map(|asset| (entity, (asset.particle_layout(), parent.map(|p| p.entity))))
@@ -1821,12 +1792,11 @@ fn compile_effects(
         entity,
         effect,
         material,
-        mesh,
         parent_entity,
         parent_layout,
         mut compiled_effect,
     ) in q_effects.iter_mut().filter_map(
-        |(entity, effect, material, mesh, parent, compiled_effect)| {
+        |(entity, effect, material, parent, compiled_effect)| {
             // Check if asset is available, otherwise silently ignore as we can't check for
             // changes, and conceptually it makes no sense to render a particle effect whose
             // asset was unloaded.
@@ -1851,7 +1821,6 @@ fn compile_effects(
                 entity,
                 effect,
                 material,
-                mesh,
                 parent_entity,
                 parent_layout,
                 compiled_effect,
@@ -1877,12 +1846,10 @@ fn compile_effects(
                 need_rebuild,
                 &effect,
                 material.map(|r| r.into_inner()),
-                mesh.map(|r| r.into_inner()),
                 asset,
                 parent_entity,
                 child_entities,
                 parent_layout,
-                &asset_server,
             );
         } else {
             // Update the PRNG seed. Unfortunately at the minute the "seed" (which
@@ -1896,7 +1863,7 @@ fn compile_effects(
     }
 
     // Clear removed effects, to allow them to be released by the asset server
-    for (_, effect, _, _, parent, mut compiled_effect) in q_effects.iter_mut() {
+    for (_, effect, _, parent, mut compiled_effect) in q_effects.iter_mut() {
         // If the effect has no asset, clear its compilation
         if effects.get(&effect.handle).is_none() {
             compiled_effect.clear();

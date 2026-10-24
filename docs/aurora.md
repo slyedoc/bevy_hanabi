@@ -1,9 +1,12 @@
 # Hanabi on aurora
 
 Branch `aurora` of slyedoc/bevy_hanabi: Hanabi's front end (effect asset, modifiers, expression
-graph, properties, spawners, events) on aurora, the pure-Vulkan ray tracer, in place of the wgpu
-render graph. Shaders are Slang. Particles are scene geometry: TLAS instance rows, so they are
-shadowed, reflected and in every view.
+graph, properties, spawners, events) emitting Slang for aurora, the pure-Vulkan ray tracer, in
+place of the wgpu render graph. This crate has no renderer: aurora depends on it and hosts the
+back end (`bevy_aurora::particles`, in `AuroraDefaultPlugins`), which builds each effect's kernels
+from `EffectShaderSources`, owns its storage and writes its particles as TLAS instance rows, so
+they are shadowed, reflected and in every view. The candle example and the kernel compile test
+live there too.
 
 ## Stages
 
@@ -23,8 +26,8 @@ shadowed, reflected and in every view.
 ## Status
 
 - Done: stages 1-3 (Slang codegen, the aurora back end, rows + per-particle colour through
-  aurora's `instance_tint`). `examples/candle.rs` runs it (`--capture DIR` for a windowless
-  reference capture). The generated kernels are compile-tested (`aurora::tests::kernels_compile`).
+  aurora's `instance_tint`). aurora's `examples/candle.rs` runs it (`--capture DIR` for a windowless
+  reference capture); `particles::tests::kernels_compile` there compiles the generated kernels.
 - Not yet: GPU spawn events (child effects; warns), fragment-stage modifiers (particle textures,
   alpha cutoff; warns), ribbons, sorting, the old wgpu examples (left in `examples/`, out of the
   manifest until ported), stage 4-6.

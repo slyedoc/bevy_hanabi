@@ -36,8 +36,9 @@ pub enum EffectSystems {
     /// [`EffectProperties`] component.
     UpdatePropertiesFromAsset,
 
-    /// Build the effects' kernels and GPU storage, and record this frame's simulation (aurora's
-    /// frame commands), after the spawners ticked and the effects compiled.
+    /// The renderer's back end builds the effects' kernels and GPU storage and records this
+    /// frame's simulation (aurora: `bevy_aurora::particles`), after the spawners ticked and the
+    /// effects compiled.
     Simulate,
 }
 
@@ -85,8 +86,7 @@ impl Plugin for HanabiPlugin {
                     compile_effects.in_set(EffectSystems::CompileEffects),
                     update_properties_from_asset.in_set(EffectSystems::UpdatePropertiesFromAsset),
                 ),
-            )
-            .add_plugins(crate::aurora::plugin);
+            );
 
         app.init_asset_loader::<EffectAssetLoader>();
 

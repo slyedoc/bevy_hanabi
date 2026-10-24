@@ -434,7 +434,7 @@ impl EffectProperties {
     /// Return the binary blob where properties have been written according to
     /// the given property layout. The size of the output blob is guaranteed
     /// to be equal to the size of the layout.
-    pub(crate) fn serialize(&self, layout: &PropertyLayout) -> Vec<u8> {
+    pub fn serialize(&self, layout: &PropertyLayout) -> Vec<u8> {
         let size = layout.cpu_size() as usize;
         let mut data = vec![0; size];
         // FIXME: O(n^2) search due to offset() being O(n) linear search already

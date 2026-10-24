@@ -44,9 +44,6 @@ anyhow = "1.0"
 ron = "0.12"
 bitflags = "2.3"
 thiserror = "2"
-ash = { version = "0.38.0", features = ["linked"] }
-# The tracer particles live in: their kernels are Slang, their output TLAS instance rows.
-bevy_aurora = { git = "https://github.com/slyedoc/aurora.git", branch = "main" }
 
 # getrandom requires both 'wasm_js' as a feature AND as a RUSTFLAGS to work on wasm
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -54,7 +51,8 @@ getrandom = { version = "0.4", default-features = false, features = [
   "wasm_js",
 ] }
 
-# Render-free bevy (aurora draws): the fork branch `aurora`, as aurora takes it.
+# Render-free bevy: the fork branch `aurora`, as aurora takes it. aurora draws the effects
+# (bevy_aurora::particles); this crate is the effect graph, its Slang and the CPU side.
 [dependencies.bevy]
 git = "https://github.com/bevyengine/bevy"
 branch = "main"
@@ -67,6 +65,7 @@ features = [
   "bevy_image",
   "bevy_mesh",
   "serialize",
+  "reflect_auto_register",
 ]
 
 [package.metadata.docs.rs]
@@ -75,20 +74,9 @@ all-features = true
 [dev-dependencies]
 futures = "0.3"
 
-[patch.crates-io]
-ash = { git = "https://github.com/slyedoc/ash", branch = "aurora" }
-ash-window = { git = "https://github.com/slyedoc/ash", branch = "aurora" }
-gpu-allocator = { git = "https://github.com/slyedoc/gpu-allocator", branch = "ash-push-rename" }
-
-[patch."https://github.com/avianphysics/avian"]
-avian3d = { git = "https://github.com/slyedoc/avian", branch = "aurora" }
-
 [patch."https://github.com/bevyengine/bevy"]
 bevy = { git = "https://github.com/slyedoc/bevy", branch = "aurora" }
 
 [workspace]
 resolver = "2"
 members = ["."]
-
-[[example]]
-name = "candle"
