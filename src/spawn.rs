@@ -642,7 +642,7 @@ impl SpawnerSettings {
 ///
 /// [`EffectParent`]: crate::EffectParent
 #[derive(Debug, Default, Clone, Copy, PartialEq, Component, Reflect)]
-#[reflect(Component)]
+#[reflect(Component, Default)]
 pub struct EffectSpawner {
     /// The spawner settings extracted from the [`EffectAsset`], or directly
     /// overriden by the user.

@@ -98,7 +98,7 @@ use bevy::{
     ecs::{component::Component, reflect::ReflectComponent, world::Mut},
     log::trace,
     platform::collections::HashSet,
-    reflect::Reflect,
+    reflect::{std_traits::ReflectDefault, Reflect},
 };
 use serde::{Deserialize, Serialize};
 
@@ -212,7 +212,7 @@ pub(crate) struct PropertyInstance {
 /// [`EffectSystems::UpdatePropertiesFromAsset`]: crate::EffectSystems::UpdatePropertiesFromAsset
 /// [`PostUpdate`]: bevy::app::PostUpdate
 #[derive(Debug, Default, Clone, Component, Reflect)]
-#[reflect(Component)]
+#[reflect(Component, Default)]
 pub struct EffectProperties {
     /// Instances of all declared properties, as well as any property manually
     /// added with [`set()`] this frame.

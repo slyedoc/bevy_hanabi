@@ -701,7 +701,7 @@ pub struct EffectVisibilityClass;
 /// invalidate the compiled effect and do not trigger a costly shader rebuild
 /// for example.
 #[derive(Debug, Default, Clone, Component, Reflect)]
-#[reflect(Component)]
+#[reflect(Component, Default)]
 #[require(CompiledParticleEffect, Transform, Visibility, VisibilityClass)]
 #[component(on_add = bevy::camera::visibility::add_visibility_class::<EffectVisibilityClass>)]
 pub struct ParticleEffect {
